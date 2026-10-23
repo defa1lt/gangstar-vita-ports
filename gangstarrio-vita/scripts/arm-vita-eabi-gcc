@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+
+: "${VITASDK:?VITASDK is not set}"
+if [ -n "${VITA_HOST_X86_64_LIB:-}" ]; then
+    export DYLD_LIBRARY_PATH="$VITA_HOST_X86_64_LIB${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+fi
+exec "$VITASDK/bin/arm-vita-eabi-gcc" "$@"

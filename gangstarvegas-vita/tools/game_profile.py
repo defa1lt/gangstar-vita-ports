@@ -1,0 +1,171 @@
+"""Fingerprint of the supplied Vegas 1.7.0g Google Play APK."""
+
+PACKAGE = "com.gameloft.android.ANMP.GloftGGHM"
+# Arrays.hashCode of the original APK signer DER (META-INF/GAMELOFT.RSA).
+APK_SIGNATURE_HASH = 404250541
+APK_SHA256 = "be75ca919c508aa815411eb513db9afa6ff4b331730abe7870180a9b6db95f40"
+MAIN_OBB_NAME = f"main.17026.{PACKAGE}.obb"
+PATCH_OBB_NAME = f"patch.17026.{PACKAGE}.obb"
+OBBS = {
+    MAIN_OBB_NAME: {"size": 2_040_290_637,
+                    "sha256": "f86f36253b2f3db3237e23693eec183d8137a6ee3cc2d42fc6c1725299c02d46"},
+    PATCH_OBB_NAME: {"size": 130_739_856,
+                     "sha256": "b64838dca405881b4418ff31e7142eaf8ebba40499c25b946c427e949866745c"},
+}
+LIBRARIES = {
+    "lib/armeabi-v7a/libGangstar4.so": {
+        "size": 39_300_800,
+        "sha256": "8de6b6d8f3d285f2d13e3da9ddaeeec930fbd650598a46ef7afafac7dacbc528",
+    },
+    "lib/armeabi-v7a/libgenerator.so": {
+        "size": 447_860,
+        "sha256": "3871b9c4ae5d1c491abbccc7af1744121bf964f52b4812d2f672c72ff7c062ed",
+    },
+}
+
+ELF_PROFILE = {
+    "symbols": 44230,
+    "relocations": 92602,
+    "imports": 392,
+    "import_relocations": 419,
+    "jni_exports": 103,
+    "constructors": 540,
+}
+RELOCATION_TYPES = {
+    "R_ARM_RELATIVE": 92183,
+    "R_ARM_GLOB_DAT": 21,
+    "R_ARM_ABS32": 15,
+    "R_ARM_JUMP_SLOT": 383,
+}
+KERNEL_HELPERS = {
+    0xffff0fa0: (0x15011e8, 0x1501230, 0x15012ac, 0x1501334, 0x1555380,
+                 0x1555494, 0x15554b4, 0x15554d4, 0x15554f4),
+    0xffff0fc0: (0x15012a8, 0x1554614, 0x155464c, 0x1554684, 0x15546bc,
+                 0x15546f4, 0x1554730, 0x1554794, 0x15547f8, 0x155485c,
+                 0x15548c0, 0x1554924, 0x155498c, 0x15549e8, 0x1554a44,
+                 0x1554aa0, 0x1554afc, 0x1554b58, 0x1554bb8, 0x1554bf0,
+                 0x1554c28, 0x1554c60, 0x1554c98, 0x1554cd0, 0x1554d0c,
+                 0x1554d78, 0x1554de4, 0x1554e50, 0x1554ebc, 0x1554f28,
+                 0x1554f98, 0x1554ffc, 0x1555060, 0x15550c4, 0x1555128,
+                 0x155518c, 0x15551f4, 0x1555238, 0x15552a4, 0x1555308,
+                 0x1555334, 0x15553b8, 0x1555418, 0x1555470),
+}
+
+TEXTURE_POLICY = {
+    "constructor": 0x78063c,
+    "constructor_word0": 0xe92d4070,
+    "constructor_word1": 0xe1a04000,
+    "selector_vtable": 0x19fb320,
+    "destructor": 0x7685f0,
+    "deleting_destructor": 0x76aed4,
+    "policy_vtable": 0x19fb2d8,
+    "release": 0x471f98,
+}
+
+OFFLINE_CLOCK = {
+    "entry": 0x11ba634,
+    "word0": 0xe92d41f0,
+    "word1": 0xe1a04001,
+    "empty_rep": 0x1ab2c08,
+}
+
+
+PLAYER_STATE = {
+    "get_player": 0x7d412c,
+    "get_player_word0": 0xe59f0004,
+    "get_player_word1": 0xe79f0000,
+    "get_position": 0x83e25c,
+    "get_position_word0": 0xe92d4070,
+    "get_position_word1": 0xe1a04000,
+    "vptr": 0x19fbd18,
+    "node": 0x48,
+    "flags": 0x768,
+    "physics_reference": 0x740,
+    "ragdoll": 0x1344,
+    "fall_state": 0xef4,
+    "node_flags": 0xf4,
+    "in_vehicle": 0x505b34,
+    "in_vehicle_word0": 0xe92d4010,
+    "in_vehicle_word1": 0xe1a04000,
+}
+
+
+
+PHYSICS_STATE = {
+    "world_slot": 0x1a59ec4,
+    "world_streamer": 0x0c,
+    "world_havok": 0xb4,
+    "world_body_begin": 0x4c,
+    "world_body_end": 0x50,
+    "streamer_grid": 0x40,
+    "fixed_island": 0x20,
+    "island_entity_count": 0x50,
+    "body_world": 0x08,
+    "body_userdata": 0x0c,
+    "body_shape": 0x10,
+    "body_island": 0xc8,
+    "body_motion_type": 0xe8,
+    "functions": {
+        "aabbs_load": (0x467ca8, "fc259fe5f04f2de9", "file_bool"),
+        "streamer_init": (0x5da1c0, "84149fe50030a0e3", "void"),
+        "streamer_load_all": (0x5d51ac, "f0402de90160a0e1", "file_void"),
+        "streamer_done": (0x5c05d0, "24309fe503309fe7", "bool"),
+        "streamer_district_loaded": (0x5c0a90, "f0002de9403090e5", "bool"),
+        "load_physics_data": (0x5fd1d4, "f04f2de90250a0e1", "file_pointer"),
+        "load_physics_system": (0x5ddd1c, "f0412de908d04de2", "file_pointer"),
+        "world_load": (0x5fa8e0, "f0472de90040a0e1", "void"),
+        "add_physics_body": (0x5cc2b0, "000051e3f04f2de9", "void"),
+        "remove_physics_body": (0x5cb570, "f04f2de90cd04de2", "void"),
+        "get_physics_body": (0x7bf7dc, "400790e5000050e3", "pointer"),
+        "get_hkp_body": (0x5dea30, "003091e50100a0e1", "pointer"),
+        "character_create": (0x5ea328, "f04f2de9028b2ded", "bool"),
+        "hkp_add_entity": (0x13a72ac, "70402de98c3090e5", "pointer"),
+        "hkp_add_batch": (0x13ac860, "f04f2de9028b2ded", "void"),
+        "hkp_remove_entity": (0x13aa020, "70402de98c6090e5", "int"),
+        "hkp_step": (0x13a44b8, "70402de90040a0e1", "int"),
+        "world_update": (0x5deb9c, "70402de90160a0e1", "void"),
+        "world_update_threaded": (0x5df354, "f0412de9028b2ded", "void"),
+    },
+}
+
+
+def write_header(path):
+    from pathlib import Path
+    library = LIBRARIES["lib/armeabi-v7a/libGangstar4.so"]
+    digest = ", ".join(f"0x{b:02x}" for b in bytes.fromhex(library["sha256"]))
+    lines = ["/* Generated by tools/game_profile.py. */", "#pragma once",
+             "#include <stdint.h>",
+             f'#define GAME_APK_SIGNATURE_HASH {APK_SIGNATURE_HASH}',
+             '#define GAME_DATA_PATH "ux0:data/gangstarvegas/"',
+             '#define GAME_SO_PATH GAME_DATA_PATH "libGangstar4.so"',
+             '#define GAME_LOG_PATH GAME_DATA_PATH "loader.log"',
+             f'#define GAME_SO_SIZE {library["size"]}u',
+             f'static const uint8_t GAME_SO_SHA256[32] = {{{digest}}};']
+    lines += [f"#define GAME_ELF_{key.upper()} {value}" for key, value in ELF_PROFILE.items()]
+    patches = ", ".join(f"{{0x{offset:x}u, 0x{address:x}u}}"
+                        for address, offsets in KERNEL_HELPERS.items() for offset in offsets)
+    lines.append("#define GAME_KERNEL_HELPERS {" + patches + "}")
+    lines += [f"#define GAME_TEXTURE_POLICY_{key.upper()} 0x{value:x}u"
+              for key, value in TEXTURE_POLICY.items()]
+    lines += [f"#define GAME_OFFLINE_CLOCK_{key.upper()} 0x{value:x}u"
+              for key, value in OFFLINE_CLOCK.items()]
+    lines += [f"#define GAME_PLAYER_STATE_{key.upper()} 0x{value:x}u"
+              for key, value in PLAYER_STATE.items()]
+    lines += [f"#define GAME_PHYSICS_STATE_{key.upper()} 0x{value:x}u"
+              for key, value in PHYSICS_STATE.items() if key != "functions"]
+    for key, (entry, guard, result) in PHYSICS_STATE["functions"].items():
+        raw = bytes.fromhex(guard)
+        prefix = "GAME_PHYSICS_STATE_" + key.upper()
+        lines += [f"#define {prefix} 0x{entry:x}u",
+                  f"#define {prefix}_WORD0 0x{int.from_bytes(raw[:4], 'little'):x}u",
+                  f"#define {prefix}_WORD1 0x{int.from_bytes(raw[4:], 'little'):x}u"]
+    output = Path(path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text("\n".join(lines) + "\n")
+
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="Generate the Vita binary profile header")
+    parser.add_argument("--header", required=True)
+    write_header(parser.parse_args().header)
