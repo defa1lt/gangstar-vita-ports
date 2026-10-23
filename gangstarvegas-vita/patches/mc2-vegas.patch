@@ -1,0 +1,466 @@
+--- a/reimpl/io.c
++++ b/reimpl/io.c
+@@ -979,9 +979,2 @@
+-    ensure_obb_indexed();
+-    for (unsigned int i = 0; i < 2; ++i) {
+-        const ObbEntry *entry = find_entry_in_obb(&s_obb_archives[i], key);
+-        if (entry) {
+-            if (archive_out) *archive_out = &s_obb_archives[i];
+-            return entry;
+-        }
+-    }
+-    if (archive_out) *archive_out = NULL;
++    /* Vegas mounts the supplied standard ZIP OBBs inside libGangstar4.so. */
++    (void)key; (void)archive_out;
+@@ -1463,46 +1456,10 @@
+-    static const char prefix[] = "bundle://";
+-    static const char sdcard_prefix[] =
+-        "/sdcard/gameloft/games/GloftBPHP";
+-    static const char mnt_sdcard_prefix[] =
+-        "/mnt/sdcard/gameloft/games/GloftBPHP";
+-    static const char rio_sdcard_prefix[] =
+-        "/sdcard/gameloft/games/GloftG4HM";
+-    static const char rio_mnt_sdcard_prefix[] =
+-        "/mnt/sdcard/gameloft/games/GloftG4HM";
+-    static const char rio_android_data_prefix[] =
+-        "/sdcard/Android/data/com.gameloft.android.ANMP.GloftG4HM";
+-    static const char app_prefix[] =
+-        "/data/data/com.gameloft.android.GAND.GloftBPHP.ML";
+-    static const char rio_data_prefix[] =
+-        "/data/data/com.gameloft.android.ANMP.GloftG4HM";
+-    static const char vita_mc2_prefix[] = "ux0:data/mc2";
+-    static const char data_prefix[] = DATA_PATH;
+-    static const char documents_prefix[] = "../Documents/";
+-    static const char rio_vita_game_prefix[] = DATA_PATH "game/";
+-    if (!path) {
+-        return path;
+-    }
+-
+-    char clean_path[PATH_MAX];
+-    size_t path_len = strlen(path);
+-    if (path_len >= PATH_MAX) path_len = PATH_MAX - 1;
+-    for (size_t i = 0; i < path_len; ++i) {
+-        clean_path[i] = (path[i] == '\\') ? '/' : path[i];
+-    }
+-    clean_path[path_len] = '\0';
+-
+-    const char *normalized = clean_path;
+-    while (strncasecmp(normalized, documents_prefix,
+-                       sizeof(documents_prefix) - 1) == 0) {
+-        normalized += sizeof(documents_prefix) - 1;
+-    }
+-
+-    const char *obb_ext = strstr(normalized, ".obb");
+-    if (obb_ext && strcasecmp(obb_ext, ".obb") == 0) {
+-        const char *filename = strrchr(normalized, '/');
+-        if (filename) {
+-            filename++;
+-        } else {
+-            filename = normalized;
+-        }
+-        snprintf(translated, PATH_MAX, "%sobb/%s", DATA_PATH, filename);
++    if (!path) return NULL;
++    static const char save_prefix[]=DATA_PATH "files/";
++    if (!strncmp(path,save_prefix,sizeof(save_prefix)-1)) {
++        const char *relative=path+sizeof(save_prefix)-1;
++        while (*relative=='/') ++relative;
++        while (!strncmp(relative,DATA_PATH,sizeof(DATA_PATH)-1)) {
++            relative+=sizeof(DATA_PATH)-1;
++            while (*relative=='/') ++relative;
++        }
++        if (snprintf(translated,PATH_MAX,"%s%s",save_prefix,relative)>=PATH_MAX) return NULL;
+@@ -1511,70 +1468,15 @@
+-
+-    /* The game's CFileSystem normally turns "data/foo" into
+-     * "./data/foo" or "/data/foo" before calling fopen.  Check Android's
+-     * true absolute paths first, then normalize those harmless prefixes
+-     * before matching the packaged data directory. */
+-    if (strncasecmp(normalized, sdcard_prefix,
+-                    sizeof(sdcard_prefix) - 1) == 0) {
+-        const char *relative = normalized + sizeof(sdcard_prefix) - 1;
+-        while (*relative == '/') relative++;
+-        snprintf(translated, PATH_MAX, "%sGloftBPHP/%s", DATA_PATH,
+-                 relative);
+-        return translated;
+-    } else if (strncasecmp(normalized, mnt_sdcard_prefix,
+-                           sizeof(mnt_sdcard_prefix) - 1) == 0) {
+-        const char *relative = normalized + sizeof(mnt_sdcard_prefix) - 1;
+-        while (*relative == '/') relative++;
+-        snprintf(translated, PATH_MAX, "%sGloftBPHP/%s", DATA_PATH,
+-                 relative);
+-        return translated;
+-    } else if (strncasecmp(normalized, rio_sdcard_prefix,
+-                           sizeof(rio_sdcard_prefix) - 1) == 0) {
+-        const char *relative = normalized + sizeof(rio_sdcard_prefix) - 1;
+-        while (*relative == '/') relative++;
+-        snprintf(translated, PATH_MAX, "%s%s", DATA_PATH, relative);
+-        return translated;
+-    } else if (strncasecmp(normalized, rio_mnt_sdcard_prefix,
+-                           sizeof(rio_mnt_sdcard_prefix) - 1) == 0) {
+-        const char *relative = normalized + sizeof(rio_mnt_sdcard_prefix) - 1;
+-        while (*relative == '/') relative++;
+-        snprintf(translated, PATH_MAX, "%s%s", DATA_PATH, relative);
+-        return translated;
+-    } else if (strncasecmp(normalized, rio_android_data_prefix,
+-                           sizeof(rio_android_data_prefix) - 1) == 0) {
+-        const char *relative = normalized + sizeof(rio_android_data_prefix) - 1;
+-        while (*relative == '/') relative++;
+-        if (strncmp(relative, "files/", 6) == 0)
+-            relative += 6;
+-        snprintf(translated, PATH_MAX, "%sfiles/%s", DATA_PATH, relative);
+-        return translated;
+-    } else if (strncmp(normalized, rio_data_prefix,
+-                       sizeof(rio_data_prefix) - 1) == 0) {
+-        const char *relative = normalized + sizeof(rio_data_prefix) - 1;
+-        while (*relative == '/') relative++;
+-        if (strncmp(relative, "files/", 6) == 0)
+-            relative += 6;
+-        snprintf(translated, PATH_MAX, "%sfiles/%s", DATA_PATH, relative);
+-        return translated;
+-    } else if (strncmp(normalized, app_prefix,
+-                       sizeof(app_prefix) - 1) == 0) {
+-        const char *relative = normalized + sizeof(app_prefix) - 1;
+-        while (*relative == '/') relative++;
+-        if (strncmp(relative, "files/", 6) == 0)
+-            relative += 6;
+-        snprintf(translated, PATH_MAX, "%sfiles/%s", DATA_PATH, relative);
+-        return translated;
+-    } else if (strncasecmp(normalized, rio_vita_game_prefix,
+-                           sizeof(rio_vita_game_prefix) - 1) == 0) {
+-        const char *relative = normalized + sizeof(rio_vita_game_prefix) - 1;
+-        while (*relative == '/') relative++;
+-        while (strncasecmp(relative, DATA_PATH, sizeof(DATA_PATH) - 1) == 0) {
+-            relative += sizeof(DATA_PATH) - 1;
+-            while (*relative == '/') relative++;
+-        }
+-        /* Android package keys are case-insensitive, while Vita paths are
+-         * not. Purple frequently emits the all-lowercase virtual mount name
+-         * `_packetc`; point that top-level mount at the extracted `_packEtc`
+-         * directory so textures are really read from loose resources. */
+-        if (strncasecmp(relative, "_packetc/", 9) == 0) {
+-            snprintf(translated, PATH_MAX, "%s_packEtc/%s", DATA_PATH,
+-                     relative + 9);
++    static const char *prefixes[] = {
++        "/sdcard/Android/obb/com.gameloft.android.ANMP.GloftGGHM",
++        "/mnt/sdcard/Android/obb/com.gameloft.android.ANMP.GloftGGHM",
++        "/storage/emulated/0/Android/obb/com.gameloft.android.ANMP.GloftGGHM",
++        "/sdcard/Android/data/com.gameloft.android.ANMP.GloftGGHM",
++        "/data/data/com.gameloft.android.ANMP.GloftGGHM",
++        "/sdcard/gameloft/games/GloftGGHM", "bundle://"
++    };
++    for (size_t i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); ++i) {
++        size_t length = strlen(prefixes[i]);
++        if (!strncmp(path, prefixes[i], length)) {
++            const char *relative = path + length;
++            while (*relative == '/') ++relative;
++            if (snprintf(translated, PATH_MAX, "%s%s", DATA_PATH, relative) >= PATH_MAX)
++                return NULL;
+@@ -1583,76 +1485,2 @@
+-        if (strncasecmp(relative, "_packres/", 9) == 0) {
+-            snprintf(translated, PATH_MAX, "%s_packRes/%s", DATA_PATH,
+-                     relative + 9);
+-            return translated;
+-        }
+-        snprintf(translated, PATH_MAX, "%s%s", DATA_PATH, relative);
+-        return translated;
+-    } else if (strncasecmp(normalized, data_prefix,
+-                           sizeof(data_prefix) - 1) == 0) {
+-        const char *relative = normalized + sizeof(data_prefix) - 1;
+-        while (*relative == '/') relative++;
+-        if (strncasecmp(relative, "_packetc/", 9) == 0) {
+-            snprintf(translated, PATH_MAX, "%s_packEtc/%s", DATA_PATH,
+-                     relative + 9);
+-            return translated;
+-        }
+-        if (strncasecmp(relative, "_packres/", 9) == 0) {
+-            snprintf(translated, PATH_MAX, "%s_packRes/%s", DATA_PATH,
+-                     relative + 9);
+-            return translated;
+-        }
+-        snprintf(translated, PATH_MAX, "%s%s", DATA_PATH, relative);
+-        return translated;
+-    } else if (strncasecmp(normalized, vita_mc2_prefix,
+-                           sizeof(vita_mc2_prefix) - 1) == 0) {
+-        /* This particular libsandstorm2.so contains an old Vita bring-up
+-         * root.  Keep it as a read/write alias without requiring a second
+-         * copy of the 370 MB data set. */
+-        const char *relative = normalized + sizeof(vita_mc2_prefix) - 1;
+-        while (*relative == '/') relative++;
+-        /* Some text lookups concatenate the legacy root twice.  Collapse the
+-         * second copy instead of producing
+-         * GloftBPHP/ux0:data/mc2/data/texts.pak. */
+-        while (strncasecmp(relative, vita_mc2_prefix,
+-                           sizeof(vita_mc2_prefix) - 1) == 0) {
+-            relative += sizeof(vita_mc2_prefix) - 1;
+-            while (*relative == '/') relative++;
+-        }
+-        snprintf(translated, PATH_MAX, "%sGloftBPHP/%s", DATA_PATH,
+-                 relative);
+-        return translated;
+-    }
+-
+-    const char *relative = normalized;
+-    if (strncmp(relative, prefix, sizeof(prefix) - 1) == 0) {
+-        relative += sizeof(prefix) - 1;
+-    } else {
+-        while (strncmp(relative, "./", 2) == 0) relative += 2;
+-        while (*relative == '/') relative++;
+-
+-        if (strncasecmp(relative, "GloftBPHP/", 11) == 0) {
+-            snprintf(translated, PATH_MAX, "%s%s", DATA_PATH, relative);
+-            return translated;
+-        }
+-        if (strncasecmp(relative, "data/", 5) == 0) {
+-            snprintf(translated, PATH_MAX, "%sGloftBPHP/%s", DATA_PATH,
+-                     relative);
+-            return translated;
+-        }
+-
+-        // AndroidFileMgr strips the URI scheme before some POSIX calls.
+-        if (strncmp(relative, "res/", 4) != 0)
+-            return path;
+-    }
+-
+-    while (*relative == '/') relative++;
+-
+-    int length = snprintf(translated, PATH_MAX, "%sassets/%s",
+-                          DATA_PATH, relative);
+-    if (length < 0 || length >= PATH_MAX) {
+-        l_warn("Bundle path is too long: %s", path);
+-        return path;
+-    }
+-
+-    l_debug("Translated %s to %s", path, translated);
+-    return translated;
++    }
++    return path;
+@@ -2310,2 +2138,12 @@
+-    l_warn("fcntl(%i, %i, ...): not implemented", fd, cmd);
+-    return 0;
++    if (cmd==1) return fcntl(fd,F_GETFD);
++    if (cmd==3) {
++        int flags=fcntl(fd,F_GETFL);
++        if (flags<0) return -1;
++        return (flags&O_ACCMODE) | (flags&O_APPEND?BIONIC_O_APPEND:0) |
++               (flags&O_NONBLOCK?BIONIC_O_NONBLOCK:0);
++    }
++    if (cmd!=0 && cmd!=2 && cmd!=4) { errno=EINVAL; return -1; }
++    va_list args; va_start(args,cmd); int value=va_arg(args,int); va_end(args);
++    if (cmd==0) return fcntl(fd,F_DUPFD,value);
++    if (cmd==2) return fcntl(fd,F_SETFD,value&1?FD_CLOEXEC:0);
++    return fcntl(fd,F_SETFL,oflags_bionic_to_newlib(value));
+--- a/reimpl/pthr.c
++++ b/reimpl/pthr.c
+@@ -630,4 +630,4 @@
+-        int shared;
+-        ret = pthread_condattr_getpshared(attr, &shared);
+-        if (ret == 0 && shared != PTHREAD_PROCESS_PRIVATE) ret = ENOTSUP;
+-        if (ret == 0) ret = pthread_condattr_getclock(attr, &clock);
++        uint32_t flags = *(const uint32_t *)attr;
++        if (flags & ~3u) ret = EINVAL;
++        else if (flags & 1u) ret = ENOTSUP;
++        clock = flags & 2u ? CLOCK_MONOTONIC : CLOCK_REALTIME;
+@@ -792 +792,2 @@
+-    return pthread_condattr_init(attr);
++    *(uint32_t *)attr = 0;
++    return 0;
+@@ -798 +799,2 @@
+-    return pthread_condattr_destroy(attr);
++    *(uint32_t *)attr = 0;
++    return 0;
+--- a/reimpl/asset_manager.cpp
++++ b/reimpl/asset_manager.cpp
+@@ -155 +155,2 @@
+-    auto ret = (off_t) fseek(a->f, offset, whence);
++    auto ret = fseek(a->f, offset, whence) == 0 ? (off_t)ftell(a->f) : (off_t)-1;
++    if (ret >= 0) a->bytesRead = (size_t)ret;
+@@ -173 +174 @@
+-    return (off_t)(a->fileSize - a->bytesRead);
++    return a->bytesRead < a->fileSize ? (off_t)(a->fileSize - a->bytesRead) : 0;
+--- a/reimpl/egl.c
++++ b/reimpl/egl.c
+@@ -401,0 +402,5 @@
++
++EGLDisplay bbr_eglGetCurrentDisplay(void) { return egl_current_display; }
++EGLSurface bbr_eglGetCurrentSurface(EGLint which) {
++    return which == 0x3059 ? egl_current_draw : which == 0x305a ? egl_current_read : EGL_NO_SURFACE;
++}
+--- a/falso_jni/FalsoJNI.c
++++ b/falso_jni/FalsoJNI.c
+@@ -273,0 +274,14 @@
++static jmethodID lookup_method(jclass clazz, const char *name, const char *signature, const char *legacy) {
++    jmethodID method=NULL;
++    if (clazz && (uintptr_t)clazz!=0x42424242 && (uintptr_t)clazz!=0x69696969) {
++        char qualified[512];
++        int length=snprintf(qualified,sizeof(qualified),"%s/%s%s",(char *)clazz,name,signature);
++        if (length>=0 && (unsigned)length<sizeof(qualified)) method=getMethodIdByName(qualified);
++        if (!method) {
++            length=snprintf(qualified,sizeof(qualified),"%s/%s",(char *)clazz,name);
++            if (length>=0 && (unsigned)length<sizeof(qualified)) method=getMethodIdByName(qualified);
++        }
++    }
++    return method ? method : getMethodIdByName(legacy);
++}
++
+@@ -291 +305 @@
+-    ret = getMethodIdByName(name);
++    ret = lookup_method(clazz,_name,sig,name);
+@@ -848 +862 @@
+-    ret = getMethodIdByName(name);
++    ret = lookup_method(clazz,_name,sig,name);
+@@ -1316,16 +1330,4 @@
+-    if (!string) {
+-        fjni_logv_err("[JNI] GetStringUTFLength(env, %p): string is null", string);
+-    }
+-
+-    JavaString * str = string;
+-
+-    // Performing extraneous conversion on debug builds to show the string in the console output
+-#if FALSOJNI_DEBUGLEVEL <= FALSOJNI_DEBUG_ALL
+-    if (jstr_utf16_to_utf8(str) == JNI_FALSE) {
+-        fjni_logv_err("[JNI] GetStringUTFLength(env, %p): debug utf16 conversion failed", string);
+-    } else {
+-        fjni_logv_dbg("[JNI] GetStringUTFLength(env, \"%s\")", str->utf8->array);
+-    }
+-#endif
+-
+-    return str->utf16->len;
++    (void)env;
++    JavaString *str=string;
++    if (!str || !jstr_utf16_to_utf8(str)) return 0;
++    return str->utf8->len-1;
+@@ -1346,12 +1348,3 @@
+-    char * ret = malloc(str->utf16->len + 1);
+-    if (ret == NULL) {
+-        fjni_logv_err("[JNI] GetStringUTFChars(env, %p, *isCopy): malloc failed", string);
+-        return NULL;
+-    }
+-
+-    if (jstr_utf16_to_utf8(str) == JNI_FALSE) {
+-        fjni_logv_err("[JNI] GetStringUTFChars(env, %p, *isCopy): utf16 conversion failed", string);
+-        free(ret);
+-        return NULL;
+-    }
+-
++    if (jstr_utf16_to_utf8(str) == JNI_FALSE) return NULL;
++    char *ret = malloc(str->utf8->len + 1);
++    if (!ret) return NULL;
+@@ -1358,0 +1352 @@
++    ret[str->utf8->len] = '\0';
+--- a/falso_jni/FalsoJNI_ImplBridge.c
++++ b/falso_jni/FalsoJNI_ImplBridge.c
+@@ -20 +20 @@
+-#include <malloc.h>
++#include <stdlib.h>
+@@ -279 +279,3 @@
+-    void * array = malloc(len * getFieldTypeSize(type));
++    if (len < 0) return NULL;
++    size_t bytes = (size_t)len * getFieldTypeSize(type);
++    void * array = malloc(bytes ? bytes : 1);
+@@ -306 +308 @@
+-    if (!jda)
++    if (!jda || len < 0)
+@@ -309 +311,2 @@
+-    void * res = realloc(jda->array, len * getFieldTypeSize(jda->type));
++    size_t bytes = (size_t)len * getFieldTypeSize(jda->type);
++    void * res = realloc(jda->array, bytes ? bytes : 1);
+@@ -314,0 +318 @@
++    jda->len = len;
+@@ -332,18 +336,8 @@
+-jboolean jstr_utf16_to_utf8(JavaString * jstr) {
+-    if (!jstr) return JNI_FALSE;
+-
+-    if (jstr->utf8 == NULL) {
+-        jstr->utf8 = jda_alloc(jstr->utf16->len+1, FIELD_TYPE_BYTE);
+-        if (jstr->utf8 == NULL) {
+-            return JNI_FALSE;
+-        }
+-    } else if (jstr->utf8->len < jstr->utf16->len+1) {
+-        if (jda_realloc(jstr->utf8, jstr->utf16->len+1) == JNI_FALSE) {
+-            return JNI_FALSE;
+-        }
+-    }
+-
+-    utf16_to_utf8(jstr->utf16->array, jstr->utf16->len, jstr->utf8->array, jstr->utf8->len);
+-
+-    char * arr = jstr->utf8->array;
+-    arr[jstr->utf8->len - 1] = '\0';
++jboolean jstr_utf16_to_utf8(JavaString *jstr) {
++    if (!jstr || !jstr->utf16) return JNI_FALSE;
++    size_t size=utf16_to_utf8(jstr->utf16->array,jstr->utf16->len,NULL,0)+1;
++    if (!jstr->utf8) jstr->utf8=jda_alloc(size,FIELD_TYPE_BYTE);
++    else if (jstr->utf8->len != size && !jda_realloc(jstr->utf8,size)) return JNI_FALSE;
++    if (!jstr->utf8) return JNI_FALSE;
++    utf16_to_utf8(jstr->utf16->array,jstr->utf16->len,jstr->utf8->array,size-1);
++    ((char *)jstr->utf8->array)[size-1]=0;
+@@ -353,15 +347,5 @@
+-jboolean jstr_utf8_to_utf16(JavaString * jstr) {
+-    if (!jstr) return JNI_FALSE;
+-
+-    if (jstr->utf8 == NULL) {
+-        return JNI_FALSE;
+-    }
+-
+-    if (jstr->utf16->len + 1 < jstr->utf8->len) {
+-        if (jda_realloc(jstr->utf16, jstr->utf8->len - 1) == JNI_FALSE) {
+-            return JNI_FALSE;
+-        }
+-    }
+-
+-    utf8_to_utf16(jstr->utf8->array, jstr->utf8->len - 1, jstr->utf16->array, jstr->utf16->len);
+-
++jboolean jstr_utf8_to_utf16(JavaString *jstr) {
++    if (!jstr || !jstr->utf8 || !jstr->utf16) return JNI_FALSE;
++    size_t size=utf8_to_utf16(jstr->utf8->array,jstr->utf8->len-1,NULL,0);
++    if (jstr->utf16->len != size && !jda_realloc(jstr->utf16,size)) return JNI_FALSE;
++    utf8_to_utf16(jstr->utf8->array,jstr->utf8->len-1,jstr->utf16->array,size);
+--- a/utils/glutil.c
++++ b/utils/glutil.c
+@@ -60,0 +61,8 @@
++    static unsigned samples;
++    if (++samples<=8 || samples%300==0) {
++        SceKernelFreeMemorySizeInfo kernel={.size=sizeof(kernel)};
++        int result=sceKernelGetFreeMemorySize(&kernel);
++        port_trace("GL: kernel memory sample=%u result=%d USER=%d CDRAM=%d PHYCONT=%d pool_RAM=%u/%u pool_VRAM=%u/%u",
++                   samples,result,kernel.size_user,kernel.size_cdram,kernel.size_phycont,
++                   last_ram_free,last_ram_total,last_vram_free,last_vram_total);
++    }
+@@ -417,2 +425,4 @@
+-    glTexImage2D_soloader(target, upload_level, GL_RGBA, width, height, border,
+-                          GL_RGBA, GL_UNSIGNED_BYTE, rgba);
++    uint64_t started = sceKernelGetSystemTimeWide();
++    vglTexImage2DTight(target, upload_level, GL_RGBA, width, height, border,
++                       GL_RGBA, GL_UNSIGNED_BYTE, rgba);
++    record_texture_work(decoded_size,sceKernelGetSystemTimeWide()-started);
+@@ -452,2 +462,4 @@
+-    glTexSubImage2D_soloader(target, level, xoffset, yoffset, width, height,
+-                             GL_RGBA, GL_UNSIGNED_BYTE, rgba);
++    uint64_t started = sceKernelGetSystemTimeWide();
++    vglTexSubImage2DTight(target, level, xoffset, yoffset, width, height,
++                          GL_RGBA, GL_UNSIGNED_BYTE, rgba);
++    record_texture_work(decoded_size,sceKernelGetSystemTimeWide()-started);
+@@ -1060 +1072,2 @@
+-    vglInitExtended(0, 960, 544, 6 * 1024 * 1024,
++    // Native pthread stacks and GXM driver blocks are outside VitaGL's pools.
++    vglInitExtended(0, 960, 544, 24 * 1024 * 1024,
+@@ -1061,0 +1075,4 @@
++    uint64_t cache_started = sceKernelGetSystemTimeWide();
++    unsigned prepared = vglPreloadShaderCache();
++    port_trace("GL: shader cache preloaded=%u took=%llu us", prepared,
++               (unsigned long long)(sceKernelGetSystemTimeWide()-cache_started));
+@@ -1062,0 +1080,11 @@
++    const unsigned dimensions[2][2]={{256,128},{960,544}};
++    for (unsigned i=0;i<2;++i) {
++        SceGxmRenderTargetParams target={0};
++        target.width=dimensions[i][0]; target.height=dimensions[i][1];
++        target.scenesPerFrame=1; target.multisampleMode=SCE_GXM_MULTISAMPLE_NONE;
++        target.driverMemBlock=-1;
++        unsigned bytes=0;
++        int result=sceGxmGetRenderTargetMemSize(&target,&bytes);
++        port_trace("GL: render target driver bytes %ux%u result=%d bytes=%u",
++                   dimensions[i][0],dimensions[i][1],result,bytes);
++    }
+@@ -1110 +1137,0 @@
+-                "GL_OES_depth_texture "
+@@ -1119 +1145,0 @@
+-                "GL_EXT_discard_framebuffer "

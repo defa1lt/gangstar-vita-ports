@@ -1,0 +1,542 @@
+/*
+ * This file is part of vitaGL
+ * Copyright 2017, 2018, 2019, 2020 Rinnegatamante
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published
+ * by the Free Software Foundation, version 3 of the License, or (at your
+ * option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ */
+
+/* 
+ * draw.c:
+ * Implementation for draw call functions
+ */
+#include "shared.h"
+#include "vitaGL.h"
+#include "utils/index_range.h"
+
+GLboolean prim_is_non_native = GL_FALSE; // Flag for when a primitive not supported natively by sceGxm is used
+
+static enum vgl_index_primitive index_primitive(GLenum mode) {
+    switch (mode) {
+    case GL_QUADS: return VGL_INDEX_QUADS;
+    case GL_LINE_STRIP: return VGL_INDEX_LINE_STRIP;
+    case GL_LINE_LOOP: return VGL_INDEX_LINE_LOOP;
+    default: return VGL_INDEX_NATIVE;
+    }
+}
+
+static void *prepare_element_indices(const void *source, GLsizei *count,
+        GLenum mode, GLboolean wide, uint32_t first) {
+    enum vgl_index_primitive primitive = index_primitive(mode);
+    uint32_t expanded;
+    if (!vgl_expanded_index_count(*count, primitive, wide, &expanded)) return NULL;
+    void *dest = gpu_alloc_mapped_temp(expanded * (wide ? 4u : 2u));
+    if (!dest) return NULL;
+    if (primitive == VGL_INDEX_NATIVE && !first)
+        vgl_fast_memcpy(dest, source, expanded * (wide ? 4u : 2u));
+    else
+        vgl_expand_rebased_indices(dest, source, *count, wide, primitive, first);
+    *count = (GLsizei)expanded;
+    return dest;
+}
+
+#ifdef INDICES_DRAW_SPEEDHACK
+#define can_borrow_native_indices(buffer) GL_TRUE
+#else
+#define can_borrow_native_indices(buffer) ((buffer) != NULL)
+#endif
+
+#define setup_elements_indices(type_t, first) \
+    type_t *ptr; \
+    if (!prim_is_non_native && !(first) && can_borrow_native_indices(gpu_buf)) { \
+        ptr = src; \
+        if (gpu_buf) gpu_buf->last_frame = vgl_framecount; \
+    } else { \
+        ptr = prepare_element_indices(src, &count, mode, sizeof(type_t) == 4, first); \
+        if (!ptr) { \
+            restore_polygon_mode(gxm_p); \
+            SET_GL_ERROR(GL_OUT_OF_MEMORY) \
+        } \
+        if (gpu_buf && (first)) gpu_buf->last_frame = vgl_framecount; \
+    }
+
+void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
+	THREAD_SAFE()
+
+#ifdef HAVE_DLISTS
+	// Enqueueing function to a display list if one is being compiled
+	if (_vgl_enqueue_list_func(glDrawArrays, DLIST_FUNC_U32_I32_I32, mode, first, count))
+		return;
+#endif
+#ifndef SKIP_ERROR_HANDLING
+	if (phase == MODEL_CREATION) {
+		SET_GL_ERROR(GL_INVALID_OPERATION)
+	} else if (count <= 0) {
+		SET_GL_ERROR_WITH_VALUE(GL_INVALID_VALUE, count)
+	}
+#endif
+	SceGxmPrimitiveType gxm_p;
+	gl_primitive_to_gxm(mode, gxm_p, count);
+	scene_reset();
+	GLboolean is_draw_legal = GL_TRUE;
+
+	if (cur_program != 0)
+		is_draw_legal = _glDrawArrays_CustomShadersIMPL(first, count, GL_FALSE);
+	else {
+		if (!(ffp_vertex_attrib_state & (1 << 0)))
+			return;
+		is_draw_legal = _glDrawArrays_FixedFunctionIMPL(first, count);
+	}
+
+	if (is_draw_legal)
+	{
+		uint16_t *ptr;
+		switch (mode) {
+		case GL_QUADS:
+			ptr = default_quads_idx_ptr;
+			count = (count / 2) * 3;
+			break;
+		case GL_LINE_STRIP:
+			ptr = default_line_strips_idx_ptr;
+			count = (count - 1) * 2;
+			break;
+		case GL_LINE_LOOP:
+			ptr = gpu_alloc_mapped_temp(count * 2 * sizeof(uint16_t));
+			vgl_fast_memcpy(ptr, default_line_strips_idx_ptr, (count - 1) * 2 * sizeof(uint16_t));
+			ptr[(count - 1) * 2] = count - 1;
+			ptr[(count - 1) * 2 + 1] = 0;
+			count *= 2;
+			break;
+		default:
+			ptr = default_idx_ptr;
+			break;
+		}
+
+#ifndef SKIP_ERROR_HANDLING
+		if (count > MAX_IDX_NUMBER) {
+			vgl_log("%s:%d Attempting to draw a model with glDrawArrays which is too big! Consider increasing MAX_IDX_NUMBER value... (Max requested index: %d)\n", __FILE__, __LINE__, count - 1);
+		}
+#endif
+		sceGxmDraw(gxm_context, gxm_p, SCE_GXM_INDEX_FORMAT_U16, ptr, count);
+	}
+	restore_polygon_mode(gxm_p);
+}
+
+void glMultiDrawArrays(GLenum mode, const GLint *first, const GLsizei *count, GLsizei drawcount) {
+	THREAD_SAFE()
+
+#ifndef SKIP_ERROR_HANDLING
+	if (drawcount < 0) {
+		SET_GL_ERROR_WITH_VALUE(GL_INVALID_VALUE, drawcount)
+	}
+#endif
+
+	scene_reset();
+	
+	GLint lowest = 0x7FFFFFFF;
+	GLsizei highest = 0, highest_count = 0;
+	for (int i = 0; i < drawcount; i++) {
+		if (first[i] < lowest)
+			lowest = first[i];
+		GLsizei last = first[i] + count[i];
+		if (last > highest)
+			highest = last;
+		if (count[i] > highest_count)
+			highest_count = count[i];
+	}
+	
+	SceGxmPrimitiveType gxm_p;
+	gl_primitive_to_gxm(mode, gxm_p, highest_count);
+	
+	uint16_t *idx_ptr;
+	switch (mode) {
+	case GL_QUADS:
+		idx_ptr = default_quads_idx_ptr;
+		highest_count = (highest_count / 2) * 3;
+		break;
+	case GL_LINE_STRIP:
+		idx_ptr = default_line_strips_idx_ptr;
+		highest_count = (highest_count - 1) * 2;
+		break;
+	case GL_LINE_LOOP:
+		idx_ptr = gpu_alloc_mapped_temp(highest_count * 2 * sizeof(uint16_t));
+		vgl_fast_memcpy(idx_ptr, default_line_strips_idx_ptr, (highest_count - 1) * 2 * sizeof(uint16_t));
+		idx_ptr[(highest_count - 1) * 2] = highest_count - 1;
+		idx_ptr[(highest_count - 1) * 2 + 1] = 0;
+		highest_count *= 2;
+		break;
+	default:
+		idx_ptr = default_idx_ptr;
+		break;
+	}
+	
+	if (cur_program != 0)
+		_glMultiDrawArrays_CustomShadersIMPL(gxm_p, idx_ptr, first, count, lowest, highest, drawcount);
+	else {
+		if (!(ffp_vertex_attrib_state & (1 << 0)))
+			return;
+		_glMultiDrawArrays_FixedFunctionIMPL(gxm_p, idx_ptr, first, count, lowest, highest, drawcount);
+	}
+
+	restore_polygon_mode(gxm_p);
+}
+
+void glDrawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLsizei primcount) {
+	THREAD_SAFE()
+
+#ifndef SKIP_ERROR_HANDLING
+	if (phase == MODEL_CREATION) {
+		SET_GL_ERROR(GL_INVALID_OPERATION)
+	} else if (count <= 0) {
+		SET_GL_ERROR_WITH_VALUE(GL_INVALID_VALUE, count)
+	} else if (cur_program == 0) {
+		SET_GL_ERROR(GL_INVALID_OPERATION)
+	}
+#endif
+	SceGxmPrimitiveType gxm_p;
+	gl_primitive_to_gxm(mode, gxm_p, count);
+	scene_reset();
+	GLboolean is_draw_legal = _glDrawArrays_CustomShadersIMPL(first, count, GL_TRUE);
+
+	if (is_draw_legal)
+	{
+		uint16_t *ptr;
+		switch (mode) {
+		case GL_QUADS:
+			ptr = default_quads_idx_ptr;
+			count = (count / 2) * 3;
+			break;
+		case GL_LINE_STRIP:
+			ptr = default_line_strips_idx_ptr;
+			count = (count - 1) * 2;
+			break;
+		case GL_LINE_LOOP:
+			ptr = gpu_alloc_mapped_temp(count * 2 * sizeof(uint16_t));
+			vgl_fast_memcpy(ptr, default_line_strips_idx_ptr + first * 2, (count - 1) * 2 * sizeof(uint16_t));
+			ptr[(count - 1) * 2] = count - 1;
+			ptr[(count - 1) * 2 + 1] = 0;
+			count *= 2;
+			break;
+		default:
+			ptr = default_idx_ptr;
+			break;
+		}
+
+#ifndef SKIP_ERROR_HANDLING
+		if (count > MAX_IDX_NUMBER) {
+			vgl_log("%s:%d Attempting to draw a model with glDrawArraysInstanced which is too big! Consider increasing MAX_IDX_NUMBER value... (Max requested index: %d)\n", __FILE__, __LINE__, count - 1);
+		}
+#endif
+		sceGxmDrawInstanced(gxm_context, gxm_p, SCE_GXM_INDEX_FORMAT_U16, ptr, count * primcount, count);
+	}
+	restore_polygon_mode(gxm_p);
+}
+
+void glDrawElements(GLenum mode, GLsizei count, GLenum type, const GLvoid *gl_indices) {
+	THREAD_SAFE()
+
+#ifdef HAVE_DLISTS
+	// Enqueueing function to a display list if one is being compiled
+	if (_vgl_enqueue_list_func(glDrawElements, DLIST_FUNC_U32_I32_U32_U32, mode, count, type, gl_indices))
+		return;
+#endif
+#ifndef SKIP_ERROR_HANDLING
+	if (type != GL_UNSIGNED_SHORT && type != GL_UNSIGNED_INT && type != GL_UNSIGNED_BYTE) {
+		SET_GL_ERROR_WITH_VALUE(GL_INVALID_ENUM, type)
+	} else if (phase == MODEL_CREATION) {
+		SET_GL_ERROR(GL_INVALID_OPERATION)
+	} else if (count <= 0) {
+		SET_GL_ERROR_WITH_VALUE(GL_INVALID_VALUE, count)
+	}
+#endif
+
+	SceGxmPrimitiveType gxm_p;
+	gl_primitive_to_gxm(mode, gxm_p, count);
+	scene_reset();
+	GLboolean is_draw_legal = GL_TRUE;
+
+	vbo *gpu_buf = (vbo *)cur_vao->index_array_unit;
+	uint16_t *src = gpu_buf ? (uint16_t *)((uint8_t *)gpu_buf->ptr + (uint32_t)gl_indices) : (uint16_t *)gl_indices;
+	
+	// sceGxm doesn't support 8bit indices natively, so we internally convert to 16bit
+	if (type == GL_UNSIGNED_BYTE) {
+		uint16_t *idx16 = gpu_alloc_mapped_temp(count * sizeof(uint16_t));
+		uint8_t *idx8 = (uint8_t *)src;
+		for (GLsizei i = 0; i < count; i++) {
+			idx16[i] = idx8[i];
+		}
+		src = idx16;
+	}
+	
+    uint32_t highest = 0;
+    uint32_t first_idx = _vglDrawElementsFirstIndex(src, count, type == GL_UNSIGNED_INT, &highest);
+
+	if (cur_program != 0)
+		is_draw_legal = _glDrawElements_CustomShadersIMPL(src, count, first_idx ? highest - first_idx + 1u : 0, 0, type != GL_UNSIGNED_INT ? SCE_GXM_INDEX_SOURCE_INDEX_16BIT : SCE_GXM_INDEX_SOURCE_INDEX_32BIT, first_idx);
+	else {
+		if (!(ffp_vertex_attrib_state & (1 << 0)))
+			return;
+		is_draw_legal = _glDrawElements_FixedFunctionIMPL(src, count, 0, 0, type != GL_UNSIGNED_INT ? SCE_GXM_INDEX_SOURCE_INDEX_16BIT : SCE_GXM_INDEX_SOURCE_INDEX_32BIT);
+	}
+
+	if (is_draw_legal)
+	{
+        void *draw_indices = src;
+        if (type == GL_UNSIGNED_INT) {
+            setup_elements_indices(uint32_t, first_idx);
+            draw_indices = ptr;
+        } else if (type != GL_UNSIGNED_BYTE || prim_is_non_native || first_idx) {
+            setup_elements_indices(uint16_t, first_idx);
+            draw_indices = ptr;
+        }
+#ifdef HAVE_PROFILING
+        static unsigned converted_samples = 0;
+        static unsigned draw_errors = 0;
+        if (first_idx && prim_is_non_native && converted_samples < 8) {
+            uint32_t values[6] = {0};
+            uint32_t sampled = count < 6 ? (uint32_t)count : 6u;
+            for (uint32_t i = 0; i < sampled; ++i)
+                values[i] = type == GL_UNSIGNED_INT ? ((uint32_t *)draw_indices)[i] : ((uint16_t *)draw_indices)[i];
+            vgl_log("GXM converted draw: program=%u frame=%u mode=0x%x type=0x%x primitive=%u output_count=%d first=%u max=%u source=%p output=%p sampled=%u indices=%u,%u,%u,%u,%u,%u.\n", cur_program, vgl_framecount, mode, type, gxm_p, count, first_idx, highest, src, draw_indices, sampled, values[0], values[1], values[2], values[3], values[4], values[5]);
+            converted_samples++;
+        }
+        int draw_result = sceGxmDraw(gxm_context, gxm_p, type == GL_UNSIGNED_INT ? SCE_GXM_INDEX_FORMAT_U32 : SCE_GXM_INDEX_FORMAT_U16, draw_indices, count);
+        if (draw_result && draw_errors < 8) {
+            vgl_log("GXM draw error: result=0x%x program=%u frame=%u mode=0x%x type=0x%x count=%d first=%u output=%p.\n", draw_result, cur_program, vgl_framecount, mode, type, count, first_idx, draw_indices);
+            draw_errors++;
+        }
+#else
+        sceGxmDraw(gxm_context, gxm_p, type == GL_UNSIGNED_INT ? SCE_GXM_INDEX_FORMAT_U32 : SCE_GXM_INDEX_FORMAT_U16, draw_indices, count);
+#endif
+	}
+	restore_polygon_mode(gxm_p);
+}
+
+void glDrawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, const GLvoid *gl_indices, GLint baseVertex) {
+	THREAD_SAFE()
+
+#ifndef SKIP_ERROR_HANDLING
+	if (type != GL_UNSIGNED_SHORT && type != GL_UNSIGNED_INT) {
+		SET_GL_ERROR_WITH_VALUE(GL_INVALID_ENUM, type)
+	} else if (phase == MODEL_CREATION) {
+		SET_GL_ERROR(GL_INVALID_OPERATION)
+	} else if (count <= 0) {
+		SET_GL_ERROR_WITH_VALUE(GL_INVALID_VALUE, count)
+	}
+#endif
+
+	SceGxmPrimitiveType gxm_p;
+	gl_primitive_to_gxm(mode, gxm_p, count);
+	scene_reset();
+	GLboolean is_draw_legal = GL_TRUE;
+
+	vbo *gpu_buf = (vbo *)cur_vao->index_array_unit;
+	uint16_t *src = gpu_buf ? (uint16_t *)((uint8_t *)gpu_buf->ptr + (uint32_t)gl_indices) : (uint16_t *)gl_indices;
+	if (cur_program != 0)
+		is_draw_legal = _glDrawElements_CustomShadersIMPL(src, count, 0, baseVertex, type == GL_UNSIGNED_SHORT ? SCE_GXM_INDEX_SOURCE_INDEX_16BIT : SCE_GXM_INDEX_SOURCE_INDEX_32BIT, 0);
+	else {
+		if (!(ffp_vertex_attrib_state & (1 << 0)))
+			return;
+		is_draw_legal = _glDrawElements_FixedFunctionIMPL(src, count, 0, baseVertex, type == GL_UNSIGNED_SHORT ? SCE_GXM_INDEX_SOURCE_INDEX_16BIT : SCE_GXM_INDEX_SOURCE_INDEX_32BIT);
+	}
+
+	if (is_draw_legal)
+	{
+		if (type == GL_UNSIGNED_INT) {
+			setup_elements_indices(uint32_t, 0);
+			sceGxmDraw(gxm_context, gxm_p, SCE_GXM_INDEX_FORMAT_U32 + baseVertex, ptr, count);
+		}
+		else
+		{
+			setup_elements_indices(uint16_t, 0);
+			sceGxmDraw(gxm_context, gxm_p, SCE_GXM_INDEX_FORMAT_U16 + baseVertex, ptr, count);
+		}
+	}
+	restore_polygon_mode(gxm_p);
+}
+
+void glDrawRangeElements(GLenum mode, GLuint start, GLuint end, GLsizei count, GLenum type, const void *gl_indices) {
+	THREAD_SAFE()
+
+#ifndef SKIP_ERROR_HANDLING
+	if (type != GL_UNSIGNED_SHORT && type != GL_UNSIGNED_INT) {
+		SET_GL_ERROR_WITH_VALUE(GL_INVALID_ENUM, type)
+	} else if (phase == MODEL_CREATION) {
+		SET_GL_ERROR(GL_INVALID_OPERATION)
+	} else if (count <= 0) {
+		SET_GL_ERROR_WITH_VALUE(GL_INVALID_VALUE, count)
+	} else if (end < start) {
+		SET_GL_ERROR(GL_INVALID_VALUE)
+	}
+#endif
+
+	SceGxmPrimitiveType gxm_p;
+	gl_primitive_to_gxm(mode, gxm_p, count);
+	scene_reset();
+	GLboolean is_draw_legal = GL_TRUE;
+
+	vbo *gpu_buf = (vbo *)cur_vao->index_array_unit;
+	uint16_t *src = gpu_buf ? (uint16_t *)((uint8_t *)gpu_buf->ptr + (uint32_t)gl_indices) : (uint16_t *)gl_indices;
+	if (cur_program != 0)
+		is_draw_legal = _glDrawElements_CustomShadersIMPL(src, count, end + 1, 0, type == GL_UNSIGNED_SHORT ? SCE_GXM_INDEX_SOURCE_INDEX_16BIT : SCE_GXM_INDEX_SOURCE_INDEX_32BIT, 0);
+	else {
+		if (!(ffp_vertex_attrib_state & (1 << 0)))
+			return;
+		is_draw_legal = _glDrawElements_FixedFunctionIMPL(src, count, end + 1, 0, type == GL_UNSIGNED_SHORT ? SCE_GXM_INDEX_SOURCE_INDEX_16BIT : SCE_GXM_INDEX_SOURCE_INDEX_32BIT);
+	}
+
+	if (is_draw_legal)
+	{
+		if (type == GL_UNSIGNED_INT) {
+			setup_elements_indices(uint32_t, 0);
+			sceGxmDraw(gxm_context, gxm_p, SCE_GXM_INDEX_FORMAT_U32, ptr, count);
+		}
+		else
+		{
+			setup_elements_indices(uint16_t, 0);
+			sceGxmDraw(gxm_context, gxm_p, SCE_GXM_INDEX_FORMAT_U16, ptr, count);
+		}
+	}
+	restore_polygon_mode(gxm_p);
+}
+
+void glDrawRangeElementsBaseVertex(GLenum mode, GLuint start, GLuint end, GLsizei count, GLenum type, void *gl_indices, GLint baseVertex) {
+	THREAD_SAFE()
+
+#ifndef SKIP_ERROR_HANDLING
+	if (type != GL_UNSIGNED_SHORT && type != GL_UNSIGNED_INT) {
+		SET_GL_ERROR_WITH_VALUE(GL_INVALID_ENUM, type)
+	} else if (phase == MODEL_CREATION) {
+		SET_GL_ERROR(GL_INVALID_OPERATION)
+	} else if (count <= 0) {
+		SET_GL_ERROR_WITH_VALUE(GL_INVALID_VALUE, count)
+	}
+#endif
+
+	SceGxmPrimitiveType gxm_p;
+	gl_primitive_to_gxm(mode, gxm_p, count);
+	scene_reset();
+	GLboolean is_draw_legal = GL_TRUE;
+
+	vbo *gpu_buf = (vbo *)cur_vao->index_array_unit;
+	uint16_t *src = gpu_buf ? (uint16_t *)((uint8_t *)gpu_buf->ptr + (uint32_t)gl_indices) : (uint16_t *)gl_indices;
+	if (cur_program != 0)
+		is_draw_legal = _glDrawElements_CustomShadersIMPL(src, count, end + baseVertex + 1, baseVertex, type == GL_UNSIGNED_SHORT ? SCE_GXM_INDEX_SOURCE_INDEX_16BIT : SCE_GXM_INDEX_SOURCE_INDEX_32BIT, 0);
+	else {
+		if (!(ffp_vertex_attrib_state & (1 << 0)))
+			return;
+		is_draw_legal = _glDrawElements_FixedFunctionIMPL(src, count, end + baseVertex + 1, baseVertex, type == GL_UNSIGNED_SHORT ? SCE_GXM_INDEX_SOURCE_INDEX_16BIT : SCE_GXM_INDEX_SOURCE_INDEX_32BIT);
+	}
+
+	if (is_draw_legal)
+	{
+		if (type == GL_UNSIGNED_INT) {
+			setup_elements_indices(uint32_t, 0)
+			sceGxmDraw(gxm_context, gxm_p, SCE_GXM_INDEX_FORMAT_U32 + baseVertex, ptr, count);
+		}
+		else
+		{
+			setup_elements_indices(uint16_t, 0)
+			sceGxmDraw(gxm_context, gxm_p, SCE_GXM_INDEX_FORMAT_U16 + baseVertex, ptr, count);
+		}
+	}
+	restore_polygon_mode(gxm_p);
+}
+
+void glDrawElementsInstanced(GLenum mode, GLsizei count, GLenum type, const void *gl_indices, GLsizei primcount) {
+	THREAD_SAFE()
+
+#ifndef SKIP_ERROR_HANDLING
+	if (type != GL_UNSIGNED_SHORT && type != GL_UNSIGNED_INT) {
+		SET_GL_ERROR_WITH_VALUE(GL_INVALID_ENUM, type)
+	} else if (phase == MODEL_CREATION) {
+		SET_GL_ERROR(GL_INVALID_OPERATION)
+	} else if (count <= 0) {
+		SET_GL_ERROR_WITH_VALUE(GL_INVALID_VALUE, count)
+	} else if (cur_program == 0) {
+		SET_GL_ERROR(GL_INVALID_OPERATION)
+	}
+#endif
+
+	SceGxmPrimitiveType gxm_p;
+	gl_primitive_to_gxm(mode, gxm_p, count);
+	scene_reset();
+
+	vbo *gpu_buf = (vbo *)cur_vao->index_array_unit;
+	uint16_t *src = gpu_buf ? (uint16_t *)((uint8_t *)gpu_buf->ptr + (uint32_t)gl_indices) : (uint16_t *)gl_indices;
+	GLboolean is_draw_legal = _glDrawElements_CustomShadersIMPL(src, count, 0, 0, type == GL_UNSIGNED_SHORT ? SCE_GXM_INDEX_SOURCE_INSTANCE_16BIT : SCE_GXM_INDEX_SOURCE_INSTANCE_32BIT, 0);
+
+	if (is_draw_legal)
+	{
+		if (type == GL_UNSIGNED_INT) {
+			setup_elements_indices(uint32_t, 0);
+			sceGxmDrawInstanced(gxm_context, gxm_p, SCE_GXM_INDEX_FORMAT_U32, ptr, count * primcount, count);
+		}
+		else
+		{
+			setup_elements_indices(uint16_t, 0);
+			sceGxmDrawInstanced(gxm_context, gxm_p, SCE_GXM_INDEX_FORMAT_U16, ptr, count * primcount, count);
+		}
+	}
+	restore_polygon_mode(gxm_p);
+}
+
+void vglDrawObjects(GLenum mode, GLsizei count) {
+	THREAD_SAFE()
+
+#ifdef ENABLE_LEGACY_PIPELINE
+#ifndef SKIP_ERROR_HANDLING
+	if (phase == MODEL_CREATION) {
+		SET_GL_ERROR(GL_INVALID_OPERATION)
+	} else if (count <= 0) {
+		SET_GL_ERROR_WITH_VALUE(GL_INVALID_VALUE, count)
+	}
+#endif
+
+	SceGxmPrimitiveType gxm_p;
+	gl_primitive_to_gxm(mode, gxm_p, count);
+	scene_reset();
+
+	texture_unit *tex_unit = &texture_units[0];
+	if (cur_program != 0) {
+		if (!_vglDrawObjects_CustomShadersIMPL())
+			return;
+		sceGxmDraw(gxm_context, gxm_p, SCE_GXM_INDEX_FORMAT_U16, index_object, count);
+	} else if (ffp_vertex_attrib_state & (1 << FFP_ATTRIB_POSITION)) {
+		if (reload_ffp_shaders(NULL, NULL, SCE_GXM_INDEX_SOURCE_INDEX_16BIT) < 0)
+			return;
+		if (ffp_vertex_attrib_state & (1 << FFP_ATTRIB_TEX0)) {
+			if (texture_slots[tex_unit->tex_id[0]].status != TEX_VALID)
+				return;
+#ifndef TEXTURES_SPEEDHACK
+			texture_slots[tex_unit->tex_id[0]].last_frame = vgl_framecount;
+#endif
+			sceGxmSetFragmentTexture(gxm_context, 0, &texture_slots[tex_unit->tex_id[0]].gxm_tex);
+			sceGxmSetVertexStream(gxm_context, 1, texture_object);
+			if (ffp_vertex_num_params > 2)
+				sceGxmSetVertexStream(gxm_context, 2, color_object);
+		} else if (ffp_vertex_num_params > 1)
+			sceGxmSetVertexStream(gxm_context, 1, color_object);
+		sceGxmSetVertexStream(gxm_context, 0, vertex_object);
+		sceGxmDraw(gxm_context, gxm_p, SCE_GXM_INDEX_FORMAT_U16, index_object, count);
+	}
+
+	restore_polygon_mode(gxm_p);
+#endif
+}
+
+void vglIndexPointerDefault() {
+	THREAD_SAFE()
+
+	index_object = default_idx_ptr;
+}

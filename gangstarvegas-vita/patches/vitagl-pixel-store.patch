@@ -1,0 +1,836 @@
+--- a/Makefile
++++ b/Makefile
+@@ -1,0 +2 @@
++.DEFAULT_GOAL := all
+@@ -14,0 +16 @@
++VGL_GIT_HASH ?= $(shell git rev-parse --short HEAD)
+@@ -16 +18 @@
+-	-DVGL_GIT_HASH='"$(shell git rev-parse --short HEAD)"'
++	-DVGL_GIT_HASH='"$(VGL_GIT_HASH)"'
+@@ -267,0 +270,3 @@
++
++CFLAGS += -MMD -MP
++$(OBJS): Makefile
+@@ -284 +289 @@
+-	@rm -rf $(TARGET).a $(TARGET).elf $(OBJS)
++	@rm -rf $(TARGET).a $(TARGET).elf $(OBJS) $(OBJS:.o=.d)
+@@ -292,0 +298,2 @@
++
++-include $(OBJS:.o=.d)
+--- a/source/shared.h
++++ b/source/shared.h
+@@ -281,0 +282 @@
++#include <psp2/kernel/threadmgr.h>
+@@ -1081,0 +1083,41 @@
++
++typedef struct {
++    uint64_t setup_us, temp_bytes, spill_bytes, spill_us;
++    uint64_t scene_us, queue_us, gc_us, finish_us;
++    uint32_t setups, links, uploads, spills, scenes, finishes, active;
++} vgl_frame_work;
++extern vgl_frame_work vgl_work;
++void vgl_work_report(void);
++static inline uint64_t vgl_work_tick(void) {
++    return vgl_work.active ? sceKernelGetSystemTimeWide() : 0;
++}
++static inline void vgl_work_elapsed(uint64_t *counter, uint64_t started) {
++    if (vgl_work.active) *counter += sceKernelGetSystemTimeWide() - started;
++}
++
++extern int pack_alignment, unpack_alignment;
++#include "pixel_layout.h"
++static inline unsigned vgl_pixel_bytes(GLenum format, GLenum type) {
++    switch (type) {
++    case GL_UNSIGNED_SHORT_5_6_5:
++    case GL_UNSIGNED_SHORT_4_4_4_4:
++    case GL_UNSIGNED_SHORT_5_5_5_1:
++    case GL_UNSIGNED_SHORT_1_5_5_5_REV: return 2;
++    case GL_UNSIGNED_INT_8_8_8_8:
++    case GL_UNSIGNED_INT_8_8_8_8_REV: return 4;
++    case GL_HALF_FLOAT:
++    case GL_HALF_FLOAT_OES: return format == GL_RGBA ? 8 : 0;
++    case GL_RGBA16F: return format == GL_RGBA ? 16 : 0;
++    case GL_UNSIGNED_BYTE:
++        switch (format) {
++        case GL_RED: case GL_R8: case GL_ALPHA: case GL_LUMINANCE: return 1;
++        case GL_RG: case GL_RG8: case GL_LUMINANCE_ALPHA: return 2;
++        case GL_RGB: case GL_RGB8: case GL_BGR: return 3;
++        case GL_RGBA: case GL_RGBA8: case GL_BGRA: case GL_ABGR_EXT: return 4;
++        }
++    }
++    return 0;
++}
++GLboolean vgl_read_pixels_tight(GLint x, GLint y, GLsizei width, GLsizei height,
++                           GLenum format, GLenum type, GLvoid *data);
++
+--- a/source/vitaGL.h
++++ b/source/vitaGL.h
+@@ -974,0 +975 @@
++void vglTexImage2DTight(GLenum target, GLint level, GLint internalFormat, GLsizei width, GLsizei height, GLint border, GLenum format, GLenum type, const GLvoid *data);
+@@ -980,0 +982 @@
++void vglTexSubImage2DTight(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height, GLenum format, GLenum type, const GLvoid *pixels);
+--- a/source/pixel_layout.h
++++ b/source/pixel_layout.h
+@@ -0,0 +1,26 @@
++#ifndef VGL_PIXEL_LAYOUT_H
++#define VGL_PIXEL_LAYOUT_H
++#include <stdint.h>
++#include <stddef.h>
++#include <string.h>
++
++static inline int vgl_pixel_layout(int width, int height, unsigned bpp,
++                                   int row_length, int alignment,
++                                   uint32_t *stride, uint32_t *span) {
++    if (width < 0 || height < 0 || row_length < 0 || !bpp ||
++        (alignment != 1 && alignment != 2 && alignment != 4 && alignment != 8)) return 0;
++    uint64_t row = (uint64_t)(row_length ? row_length : width) * bpp;
++    row = (row + alignment - 1) & ~(uint64_t)(alignment - 1);
++    uint64_t size = height && width ? (uint64_t)(height - 1) * row + (uint64_t)width * bpp : 0;
++    if (row > UINT32_MAX || size > UINT32_MAX) return 0;
++    *stride = row; *span = size;
++    return 1;
++}
++static inline void vgl_pixel_copy_rows(void *dst, uint32_t dst_stride,
++                                      const void *src, uint32_t src_stride,
++                                      uint32_t row_bytes, int height) {
++    for (int y = 0; y < height; ++y)
++        memcpy((uint8_t *)dst + (size_t)y * dst_stride,
++               (const uint8_t *)src + (size_t)y * src_stride, row_bytes);
++}
++#endif
+--- a/source/textures.c
++++ b/source/textures.c
+@@ -81,0 +82 @@
++int pack_alignment = 4, unpack_alignment = 4;
+@@ -472 +473,23 @@
+-static inline __attribute__((always_inline)) void _glTexImage2D_CubeIMPL(texture *tex, GLint level, GLint internalFormat, GLsizei width, GLsizei height, GLenum format, GLenum type, const GLvoid *data, int index) {
++static GLenum prepare_pixel_unpack(const void *data, GLsizei width, GLsizei height,
++                                   GLenum format, GLenum type, GLint alignment,
++                                   GLint row_length, const void **pixels, void **owned) {
++    *pixels = data; *owned = NULL;
++    unsigned bpp = vgl_pixel_bytes(format, type);
++    if (!bpp) return GL_NO_ERROR; // The existing format validator reports unsupported pairs.
++    uint32_t stride, span, tight_stride, tight_span;
++    if (!vgl_pixel_layout(width,height,bpp,row_length,alignment,&stride,&span) ||
++        !vgl_pixel_layout(width,height,bpp,0,1,&tight_stride,&tight_span)) return GL_INVALID_VALUE;
++    if (!data || !span || height == 1 || stride == tight_stride) return GL_NO_ERROR;
++    if ((uintptr_t)data > UINTPTR_MAX - (span - 1)) return GL_INVALID_VALUE;
++    *owned = vglMalloc(tight_span);
++    if (!*owned) return GL_OUT_OF_MEMORY;
++    vgl_pixel_copy_rows(*owned,tight_stride,data,stride,tight_stride,height);
++    *pixels = *owned;
++    return GL_NO_ERROR;
++}
++
++static inline __attribute__((always_inline)) void _glTexImage2D_CubeIMPL(texture *tex, GLint level, GLint internalFormat, GLsizei width, GLsizei height, GLenum format, GLenum type, const GLvoid *data, int index, GLint alignment, GLint row_length) {
++    if (width < 0 || height < 0 || level < 0 || width > GXM_TEX_MAX_SIZE || height > GXM_TEX_MAX_SIZE) {
++        SET_GL_ERROR(GL_INVALID_VALUE)
++    }
++
+@@ -572,0 +596,4 @@
++    const void *normalized; void *owned;
++    GLenum error = prepare_pixel_unpack(data,width,height,format,type,alignment,row_length,&normalized,&owned);
++    if (error) { SET_GL_ERROR(error) }
++    data = normalized;
+@@ -588,3 +615,8 @@
+-}
+-
+-static inline __attribute__((always_inline)) void _glTexImage2D_FlatIMPL(texture *tex, GLint level, GLint internalFormat, GLsizei width, GLsizei height, GLenum format, GLenum type, const GLvoid *data) {
++    if (owned) vgl_free(owned);
++}
++
++static inline __attribute__((always_inline)) void _glTexImage2D_FlatIMPL(texture *tex, GLint level, GLint internalFormat, GLsizei width, GLsizei height, GLenum format, GLenum type, const GLvoid *data, GLint alignment, GLint row_length) {
++    if (width < 0 || height < 0 || level < 0 || width > GXM_TEX_MAX_SIZE || height > GXM_TEX_MAX_SIZE) {
++        SET_GL_ERROR(GL_INVALID_VALUE)
++    }
++
+@@ -870,0 +903,4 @@
++    const void *normalized; void *owned;
++    GLenum error = prepare_pixel_unpack(data,width,height,format,type,alignment,row_length,&normalized,&owned);
++    if (error) { SET_GL_ERROR(error) }
++    data = normalized;
+@@ -945,3 +981,4 @@
+-}
+-
+-static inline __attribute__((always_inline)) void _glTexSubImage2D(texture *tex, GLenum target, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height, GLenum format, GLenum type, const GLvoid *pixels) {
++    if (owned) vgl_free(owned);
++}
++
++static inline __attribute__((always_inline)) void _glTexSubImage2D(texture *tex, GLenum target, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height, GLenum format, GLenum type, const GLvoid *pixels, GLint alignment, GLint row_length) {
+@@ -1161 +1198,5 @@
+-	case GL_TEXTURE_2D:
++	case GL_TEXTURE_2D: {
++    const void *normalized; void *owned;
++    GLenum error = prepare_pixel_unpack(pixels,width,height,format,type,alignment,row_length,&normalized,&owned);
++    if (error) { SET_GL_ERROR(error) }
++    pixels = normalized;
+@@ -1243 +1284 @@
+-			uint32_t src_stride = (unpack_row_len ? unpack_row_len : width) * bpp;
++			uint32_t src_stride = width * bpp;
+@@ -1263,4 +1303,0 @@
+-				if (unpack_row_len) {
+-					data = (uint8_t *)pixels + unpack_row_len * data_bpp;
+-					pixels = data;
+-				}
+@@ -1271 +1308,3 @@
+-		break;
++        if (owned) vgl_free(owned);
++        break;
++    }
+@@ -1279 +1318 @@
+-			_glTexImage2D_CubeIMPL(tex, level, format, width, height, format, type, pixels, target - GL_TEXTURE_CUBE_MAP_POSITIVE_X);
++			_glTexImage2D_CubeIMPL(tex, level, format, width, height, format, type, pixels, target - GL_TEXTURE_CUBE_MAP_POSITIVE_X, alignment, row_length);
+@@ -1703,0 +1743,2 @@
++
++
+@@ -1708,2 +1749,11 @@
+-	case GL_UNPACK_ROW_LENGTH:
+-		unpack_row_len = param;
++	case GL_PACK_ALIGNMENT:
++    case GL_UNPACK_ALIGNMENT:
++        if (param != 1 && param != 2 && param != 4 && param != 8) {
++            SET_GL_ERROR_WITH_VALUE(GL_INVALID_VALUE, param)
++        }
++        if (pname == GL_PACK_ALIGNMENT) pack_alignment = param;
++        else unpack_alignment = param;
++        break;
++    case GL_UNPACK_ROW_LENGTH:
++        if (param < 0) { SET_GL_ERROR_WITH_VALUE(GL_INVALID_VALUE, param) }
++        unpack_row_len = param;
+@@ -1869 +1919 @@
+-void glTexImage2D(GLenum target, GLint level, GLint internalFormat, GLsizei width, GLsizei height, GLint border, GLenum format, GLenum type, const GLvoid *data) {
++static void glTexImage2D_layout(GLenum target, GLint level, GLint internalFormat, GLsizei width, GLsizei height, GLint border, GLenum format, GLenum type, const GLvoid *data, GLint alignment, GLint row_length) {
+@@ -1912 +1962 @@
+-		_glTexImage2D_FlatIMPL(tex, level, internalFormat, width, height, format, type, data);
++		_glTexImage2D_FlatIMPL(tex, level, internalFormat, width, height, format, type, data, alignment, row_length);
+@@ -1920 +1970 @@
+-		_glTexImage2D_CubeIMPL(tex, level, internalFormat, width, height, format, type, data, target - GL_TEXTURE_CUBE_MAP_POSITIVE_X);
++		_glTexImage2D_CubeIMPL(tex, level, internalFormat, width, height, format, type, data, target - GL_TEXTURE_CUBE_MAP_POSITIVE_X, alignment, row_length);
+@@ -1927 +1977,12 @@
+-void glTextureImage2D(GLuint tex_id, GLint level, GLint internalFormat, GLsizei width, GLsizei height, GLint border, GLenum format, GLenum type, const GLvoid *data) {
++
++void glTexImage2D(GLenum target, GLint level, GLint internalFormat, GLsizei width, GLsizei height, GLint border, GLenum format, GLenum type, const GLvoid *data) {
++    THREAD_SAFE()
++    glTexImage2D_layout(target, level, internalFormat, width, height, border, format, type, data,unpack_alignment,unpack_row_len);
++}
++void vglTexImage2DTight(GLenum target, GLint level, GLint internalFormat, GLsizei width, GLsizei height, GLint border, GLenum format, GLenum type, const GLvoid *data) {
++    THREAD_SAFE()
++    glTexImage2D_layout(target, level, internalFormat, width, height, border, format, type, data,1,0);
++}
++
++
++static void glTextureImage2D_layout(GLuint tex_id, GLint level, GLint internalFormat, GLsizei width, GLsizei height, GLint border, GLenum format, GLenum type, const GLvoid *data, GLint alignment, GLint row_length) {
+@@ -1962 +2023,7 @@
+-	_glTexImage2D_FlatIMPL(tex, level, internalFormat, width, height, format, type, data);
++	_glTexImage2D_FlatIMPL(tex, level, internalFormat, width, height, format, type, data, alignment, row_length);
++}
++
++
++void glTextureImage2D(GLuint tex_id, GLint level, GLint internalFormat, GLsizei width, GLsizei height, GLint border, GLenum format, GLenum type, const GLvoid *data) {
++    THREAD_SAFE()
++    glTextureImage2D_layout(tex_id, level, internalFormat, width, height, border, format, type, data,unpack_alignment,unpack_row_len);
+@@ -1985 +2052 @@
+-void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height, GLenum format, GLenum type, const GLvoid *pixels) {	
++static void glTexSubImage2D_layout(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height, GLenum format, GLenum type, const GLvoid *pixels, GLint alignment, GLint row_length) {	
+@@ -1994,4 +2061,15 @@
+-	_glTexSubImage2D(tex, target, level, xoffset, yoffset, width, height, format, type, pixels);
+-}
+-
+-void glTextureSubImage2D(GLuint tex_id, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height, GLenum format, GLenum type, const GLvoid *pixels) {
++	_glTexSubImage2D(tex, target, level, xoffset, yoffset, width, height, format, type, pixels, alignment, row_length);
++}
++
++
++void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height, GLenum format, GLenum type, const GLvoid *pixels) {
++    THREAD_SAFE()
++    glTexSubImage2D_layout(target, level, xoffset, yoffset, width, height, format, type, pixels,unpack_alignment,unpack_row_len);
++}
++void vglTexSubImage2DTight(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height, GLenum format, GLenum type, const GLvoid *pixels) {
++    THREAD_SAFE()
++    glTexSubImage2D_layout(target, level, xoffset, yoffset, width, height, format, type, pixels,1,0);
++}
++
++
++static void glTextureSubImage2D_layout(GLuint tex_id, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height, GLenum format, GLenum type, const GLvoid *pixels, GLint alignment, GLint row_length) {
+@@ -2003 +2081,7 @@
+-	_glTexSubImage2D(tex, GL_TEXTURE_2D, level, xoffset, yoffset, width, height, format, type, pixels);
++	_glTexSubImage2D(tex, GL_TEXTURE_2D, level, xoffset, yoffset, width, height, format, type, pixels, alignment, row_length);
++}
++
++
++void glTextureSubImage2D(GLuint tex_id, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height, GLenum format, GLenum type, const GLvoid *pixels) {
++    THREAD_SAFE()
++    glTextureSubImage2D_layout(tex_id, level, xoffset, yoffset, width, height, format, type, pixels,unpack_alignment,unpack_row_len);
+@@ -2265,3 +2349,7 @@
+-	void *tmp = vglMalloc(width * height * 4);
+-	glReadPixels(x, y, width, height, GL_RGBA, GL_UNSIGNED_BYTE, tmp);
+-	glTexImage2D(target, level, internalformat, width, height, border, GL_RGBA, GL_UNSIGNED_BYTE, tmp);
++	uint32_t stride, span;
++    if (!vgl_pixel_layout(width,height,4,0,1,&stride,&span)) { SET_GL_ERROR(GL_INVALID_VALUE) }
++    if (!span) return;
++    void *tmp = vglMalloc(span);
++    if (!tmp) { SET_GL_ERROR(GL_OUT_OF_MEMORY) }
++	if (vgl_read_pixels_tight(x, y, width, height, GL_RGBA, GL_UNSIGNED_BYTE, tmp))
++		glTexImage2D_layout(target, level, internalformat, width, height, border, GL_RGBA, GL_UNSIGNED_BYTE, tmp, 1, 0);
+@@ -2284,3 +2372,7 @@
+-	void *tmp = vglMalloc(width * height * 4);
+-	glReadPixels(x, y, width, height, GL_RGBA, GL_UNSIGNED_BYTE, tmp);
+-	glTextureImage2D(tex_id, level, internalformat, width, height, border, GL_RGBA, GL_UNSIGNED_BYTE, tmp);
++	uint32_t stride, span;
++    if (!vgl_pixel_layout(width,height,4,0,1,&stride,&span)) { SET_GL_ERROR(GL_INVALID_VALUE) }
++    if (!span) return;
++    void *tmp = vglMalloc(span);
++    if (!tmp) { SET_GL_ERROR(GL_OUT_OF_MEMORY) }
++	if (vgl_read_pixels_tight(x, y, width, height, GL_RGBA, GL_UNSIGNED_BYTE, tmp))
++		glTextureImage2D_layout(tex_id, level, internalformat, width, height, border, GL_RGBA, GL_UNSIGNED_BYTE, tmp, 1, 0);
+@@ -2319,3 +2411,7 @@
+-	void *tmp = vglMalloc(width * height * 4);
+-	glReadPixels(x, y, width, height, GL_RGBA, GL_UNSIGNED_BYTE, tmp);
+-	glTexSubImage2D(target, level, xoffset, yoffset, width, height, GL_RGBA, GL_UNSIGNED_BYTE, tmp);
++	uint32_t stride, span;
++    if (!vgl_pixel_layout(width,height,4,0,1,&stride,&span)) { SET_GL_ERROR(GL_INVALID_VALUE) }
++    if (!span) return;
++    void *tmp = vglMalloc(span);
++    if (!tmp) { SET_GL_ERROR(GL_OUT_OF_MEMORY) }
++	if (vgl_read_pixels_tight(x, y, width, height, GL_RGBA, GL_UNSIGNED_BYTE, tmp))
++		glTexSubImage2D_layout(target, level, xoffset, yoffset, width, height, GL_RGBA, GL_UNSIGNED_BYTE, tmp, 1, 0);
+@@ -2334,3 +2430,7 @@
+-	void *tmp = vglMalloc(width * height * 4);
+-	glReadPixels(x, y, width, height, GL_RGBA, GL_UNSIGNED_BYTE, tmp);
+-	glTextureSubImage2D(tex_id, level, xoffset, yoffset, width, height, GL_RGBA, GL_UNSIGNED_BYTE, tmp);
++	uint32_t stride, span;
++    if (!vgl_pixel_layout(width,height,4,0,1,&stride,&span)) { SET_GL_ERROR(GL_INVALID_VALUE) }
++    if (!span) return;
++    void *tmp = vglMalloc(span);
++    if (!tmp) { SET_GL_ERROR(GL_OUT_OF_MEMORY) }
++	if (vgl_read_pixels_tight(x, y, width, height, GL_RGBA, GL_UNSIGNED_BYTE, tmp))
++		glTextureSubImage2D_layout(tex_id, level, xoffset, yoffset, width, height, GL_RGBA, GL_UNSIGNED_BYTE, tmp, 1, 0);
+--- a/source/textures.c
++++ b/source/textures.c
+@@ -491,0 +492 @@
++    if (vgl_work.active) vgl_work.uploads++;
+@@ -618,0 +620 @@
++    if (vgl_work.active) vgl_work.uploads++;
+@@ -984,0 +987 @@
++    if (vgl_work.active) vgl_work.uploads++;
+@@ -1328,0 +1332 @@
++    if (vgl_work.active) vgl_work.uploads++;
+--- a/source/get_info.c
++++ b/source/get_info.c
+@@ -222,0 +223,3 @@
++    case GL_PACK_ALIGNMENT: *params = (pack_alignment != 0); break;
++    case GL_UNPACK_ALIGNMENT: *params = (unpack_alignment != 0); break;
++    case GL_UNPACK_ROW_LENGTH: *params = (unpack_row_len != 0); break;
+@@ -278,0 +282,3 @@
++    case GL_PACK_ALIGNMENT: *data = pack_alignment; break;
++    case GL_UNPACK_ALIGNMENT: *data = unpack_alignment; break;
++    case GL_UNPACK_ROW_LENGTH: *data = unpack_row_len; break;
+@@ -346,4 +352 @@
+-	case GL_PACK_ALIGNMENT:
+-		*data = 1;
+-		break;
+-	default:
++		default:
+@@ -356,0 +360,3 @@
++    case GL_PACK_ALIGNMENT: *data = pack_alignment; break;
++    case GL_UNPACK_ALIGNMENT: *data = unpack_alignment; break;
++    case GL_UNPACK_ROW_LENGTH: *data = unpack_row_len; break;
+@@ -411,4 +417 @@
+-	case GL_PACK_ALIGNMENT:
+-		*data = 1;
+-		break;
+-	default:
++		default:
+@@ -537 +540 @@
+-		*data = 1;
++		*data = unpack_alignment;
+@@ -709 +712 @@
+-		*data = 1;
++		*data = pack_alignment;
+--- a/source/framebuffers.c
++++ b/source/framebuffers.c
+@@ -119 +119 @@
+-			dst_fmt, SCE_GXM_TRANSFER_LINEAR, dst, x, y, width * dst_bpp, NULL, 0, NULL);
++			dst_fmt, SCE_GXM_TRANSFER_LINEAR, dst, 0, 0, width * dst_bpp, NULL, 0, NULL);
+@@ -125 +125 @@
+-			dst_fmt, SCE_GXM_TRANSFER_LINEAR, dst, x, y, width * dst_bpp, NULL, 0, NULL);
++			dst_fmt, SCE_GXM_TRANSFER_LINEAR, dst, 0, 0, width * dst_bpp, NULL, 0, NULL);
+@@ -138 +138 @@
+-			dst_fmt, SCE_GXM_TRANSFER_LINEAR, dst, x, y, width * dst_bpp, NULL, 0, NULL);
++			dst_fmt, SCE_GXM_TRANSFER_LINEAR, dst, 0, 0, width * dst_bpp, NULL, 0, NULL);
+@@ -574 +574,2 @@
+-void glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type, GLvoid *data) {
++static void read_pixels_impl(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type, GLvoid *data, GLboolean *success) {
++    *success = GL_FALSE;
+@@ -588,0 +590 @@
++    GLint pixel_y = y;
+@@ -680,0 +683 @@
++    if (fast_store) dst_bpp = src_bpp;
+@@ -683,2 +686,4 @@
+-		if (_glReadPixels_gpu(x, y, width, height, format, type, data, GL_FALSE))
+-			return;
++		if (_glReadPixels_gpu(x, pixel_y, width, height, format, type, data, GL_FALSE)) {
++            *success = GL_TRUE;
++            return;
++        }
+@@ -782,0 +788,27 @@
++    *success = GL_TRUE;
++}
++
++GLboolean vgl_read_pixels_tight(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type, GLvoid *data) {
++    GLboolean success;
++    read_pixels_impl(x,y,width,height,format,type,data,&success);
++    return success;
++}
++
++void glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type, GLvoid *data) {
++    THREAD_SAFE()
++    unsigned bpp = vgl_pixel_bytes(format,type);
++    if (!bpp) { vgl_read_pixels_tight(x,y,width,height,format,type,data); return; }
++    uint32_t stride,span,tight_stride,tight_span;
++    if (!vgl_pixel_layout(width,height,bpp,0,pack_alignment,&stride,&span) ||
++        !vgl_pixel_layout(width,height,bpp,0,1,&tight_stride,&tight_span)) { SET_GL_ERROR(GL_INVALID_VALUE) }
++    if (!span) return;
++    if (!data || (uintptr_t)data > UINTPTR_MAX - (span - 1)) { SET_GL_ERROR(GL_INVALID_VALUE) }
++    if (stride == tight_stride || height == 1) {
++        vgl_read_pixels_tight(x,y,width,height,format,type,data);
++        return;
++    }
++    void *tight = vglMalloc(tight_span);
++    if (!tight) { SET_GL_ERROR(GL_OUT_OF_MEMORY) }
++    if (vgl_read_pixels_tight(x,y,width,height,format,type,tight))
++        vgl_pixel_copy_rows(data,stride,tight,tight_stride,tight_stride,height);
++    vgl_free(tight);
+--- a/source/utils/gpu_utils.c
++++ b/source/utils/gpu_utils.c
+@@ -377 +377 @@
+-			const int tex_size = w * h * bpp;
++			const int tex_size = w * h * src_bpp;
+--- a/source/utils/vertex_layout.h
++++ b/source/utils/vertex_layout.h
+@@ -12,0 +13,5 @@
++static inline int vgl_vbo_attribute_is_packed(uint32_t offset, uint32_t stride,
++                                             uint32_t attribute_stride) {
++    return offset <= UINT16_MAX && stride && stride == attribute_stride;
++}
++
+--- a/source/custom_shaders.c
++++ b/source/custom_shaders.c
+@@ -570,0 +571 @@
++    if (!_out) return NULL;
+@@ -676,0 +678,19 @@
++    matrix_uniform *matrices = NULL;
++	if (matrix_uniforms_num) {
++		uint32_t *ptr = vglProgramGetParameterBase(program);
++		for (uint32_t i = 0; i < matrix_uniforms_num; i++) {
++			matrix_uniform *m = vglMalloc(sizeof(matrix_uniform));
++            if (!m) {
++                while (matrices) {
++                    matrix_uniform *next = matrices->chain;
++                    vgl_free(matrices); matrices = next;
++                }
++                sceGxmShaderPatcherForceUnregisterProgram(gxm_shader_patcher, program_id);
++                vgl_free(program);
++                return GL_FALSE;
++            }
++			m->chain = matrices;
++			m->ptr = (SceGxmProgramParameter *)(ptr + _m[i] * 4);
++			matrices = m;
++		}
++	}
+@@ -688,11 +708,7 @@
+-	if (matrix_uniforms_num) {
+-		uint32_t *ptr = vglProgramGetParameterBase(program);
+-		for (uint32_t i = 0; i < matrix_uniforms_num; i++) {
+-			matrix_uniform *m = vglMalloc(sizeof(matrix_uniform));
+-			if (!m)
+-				continue;
+-			m->chain = s->mat;
+-			m->ptr = (SceGxmProgramParameter *)(ptr + _m[i] * 4);
+-			s->mat = m;
+-		}
+-	}
++    if (matrices) {
++        matrix_uniform *tail = matrices;
++        while (tail->chain) tail = tail->chain;
++        tail->chain = s->mat;
++        s->mat = matrices;
++    }
++
+@@ -751,0 +768,18 @@
++static void *read_shader_cache_blob(const char *fname, size_t limit, size_t *size) {
++    SceUID f = sceIoOpen(fname, SCE_O_RDONLY, 0777);
++    if (f < 0) return NULL;
++    SceOff end = sceIoLseek(f, 0, SCE_SEEK_END);
++    if (end <= 0 || (uint64_t)end > limit ||
++        sceIoLseek(f, 0, SCE_SEEK_SET) < 0) {
++        sceIoClose(f);
++        return NULL;
++    }
++    void *blob = vglMalloc((size_t)end);
++    if (!blob) { sceIoClose(f); return NULL; }
++    int read_size = sceIoRead(f, blob, (SceSize)end);
++    sceIoClose(f);
++    if (read_size != end) { vgl_free(blob); return NULL; }
++    *size = (size_t)end;
++    return blob;
++}
++
+@@ -753,33 +787,12 @@
+-		GLboolean load_bindings) {
+-	SceUID f = sceIoOpen(fname, SCE_O_RDONLY, 0777);
+-	if (f < 0)
+-		return GL_FALSE;
+-
+-	SceOff end = sceIoLseek(f, 0, SCE_SEEK_END);
+-	if (end <= 0 || (uint64_t)end > UINT32_MAX ||
+-		sceIoLseek(f, 0, SCE_SEEK_SET) < 0) {
+-		sceIoClose(f);
+-		sceIoRemove(fname);
+-		return GL_FALSE;
+-	}
+-
+-	size_t sz = (size_t)end;
+-	void *buf = vglMalloc(sz);
+-	if (!buf) {
+-		sceIoClose(f);
+-		return GL_FALSE;
+-	}
+-	int read_size = sceIoRead(f, buf, sz);
+-	sceIoClose(f);
+-	GLboolean valid = read_size == (int)sz &&
+-		unserialize_shader(buf, sz, s, load_bindings);
+-	vgl_free(buf);
+-	if (!valid) {
+-		vgl_log("%s:%d %s: rejecting invalid shader cache %s.\n",
+-			__FILE__, __LINE__, __func__, fname);
+-		sceIoRemove(fname);
+-	}
+-	return valid;
+-}
+-
+-#define PREPARED_SHADER_LIMIT 256u
++        GLboolean load_bindings) {
++    size_t size;
++    void *blob = read_shader_cache_blob(fname, UINT32_MAX, &size);
++    if (!blob) return GL_FALSE;
++    GLboolean valid = unserialize_shader(blob, size, s, load_bindings);
++    vgl_free(blob);
++    // Resource failure is indistinguishable from invalid data here. A later
++    // successful compilation replaces the cache; failure must preserve it.
++    if (!valid) vgl_log("Shader cache restore failed: %s.\n", fname);
++    return valid;
++}
++
+@@ -790,2 +803,2 @@
+-	shader compiled;
+-	size_t allocation_size;
++	void *serialized;
++	size_t size, allocation_size;
+@@ -793,0 +807,5 @@
++
++static struct {
++    unsigned links, prepared_hits, disk_hits, misses;
++    uint64_t total_us, cache_us, translate_us, compile_save_us, max_us;
++} shader_link_work;
+@@ -804 +822 @@
+-		release_shader(&entry->compiled);
++		vgl_free(entry->serialized);
+@@ -822,23 +840,16 @@
+-			shader *ready = &entry->compiled;
+-			/* Move compiled ownership once; identity, source and refcounts
+-			 * belong to the actual GL shader, not to the startup entry. */
+-			s->prog = ready->prog;
+-			s->id = ready->id;
+-			s->size = ready->size;
+-			s->unif_buf_size = ready->unif_buf_size;
+-			s->semantics = ready->semantics;
+-			s->mat = ready->mat;
+-#ifdef HAVE_GLSL_TEXTURE_SIZE
+-			s->sized_samplers_num = ready->sized_samplers_num;
+-			vgl_fast_memcpy(s->sized_samplers, ready->sized_samplers,
+-				sizeof(s->sized_samplers));
+-#endif
+-			*link = entry->next;
+-			prepared_shader_bytes -= entry->allocation_size;
+-			prepared_shader_count--;
+-			// The destination now owns the registration, GXP and matrix nodes.
+-			vgl_free(entry);
+-			return GL_TRUE;
+-		}
+-	}
+-	return read_cached_shader(fname, s, load_bindings);
++            *link = entry->next;
++            prepared_shader_bytes -= entry->allocation_size;
++            prepared_shader_count--;
++            GLboolean valid = unserialize_shader(entry->serialized, entry->size,
++                                                   s, load_bindings);
++            vgl_free(entry->serialized);
++            vgl_free(entry);
++            if (valid) shader_link_work.prepared_hits++;
++            else shader_link_work.misses++;
++            return valid;
++		}
++	}
++    GLboolean hit = read_cached_shader(fname, s, load_bindings);
++    if (hit) shader_link_work.disk_hits++;
++    else shader_link_work.misses++;
++    return hit;
+@@ -858 +869 @@
+-	while (prepared_shader_count < PREPARED_SHADER_LIMIT) {
++	while (prepared_shader_bytes < PREPARED_SHADER_BUDGET) {
+@@ -876,16 +887,17 @@
+-		entry->compiled.valid = GL_TRUE;
+-		if (size < 0 || (size_t)size >= sizeof(entry->filename) ||
+-			!read_cached_shader(entry->filename, &entry->compiled, GL_TRUE)) {
+-			release_shader(&entry->compiled);
+-			vgl_free(entry);
+-			continue;
+-		}
+-		size_t allocated = vglMallocUsableSize(entry) +
+-			vglMallocUsableSize((void *)entry->compiled.prog);
+-		for (matrix_uniform *m = entry->compiled.mat; m; m = m->chain)
+-			allocated += vglMallocUsableSize(m);
+-		if (allocated > PREPARED_SHADER_BUDGET - prepared_shader_bytes) {
+-			release_shader(&entry->compiled);
+-			vgl_free(entry);
+-			continue;
+-		}
++        if (size < 0 || (size_t)size >= sizeof(entry->filename)) {
++            vgl_free(entry);
++            continue;
++        }
++        size_t available = PREPARED_SHADER_BUDGET - prepared_shader_bytes;
++        size_t entry_size = vglMallocUsableSize(entry);
++        if (entry_size >= available) { vgl_free(entry); break; }
++        size_t limit = available - entry_size;
++        if (limit > PREPARED_SHADER_FILE_LIMIT) limit = PREPARED_SHADER_FILE_LIMIT;
++        entry->serialized = read_shader_cache_blob(entry->filename, limit, &entry->size);
++        if (!entry->serialized) { vgl_free(entry); continue; }
++        size_t allocated = entry_size + vglMallocUsableSize(entry->serialized);
++        if (allocated > available) {
++            vgl_free(entry->serialized);
++            vgl_free(entry);
++            continue;
++        }
+@@ -899,2 +911,2 @@
+-	vgl_log("Shader cache startup: prepared=%u bytes=%u registration_limit=%u.\n",
+-		prepared_shader_count, (unsigned)prepared_shader_bytes, PREPARED_SHADER_LIMIT);
++	vgl_log("Shader cache startup: blobs=%u bytes=%u budget=%u.\n",
++		prepared_shader_count, (unsigned)prepared_shader_bytes, PREPARED_SHADER_BUDGET);
+@@ -991,9 +1003,11 @@
+-		SceUID f = sceIoOpen(cache_fname, SCE_O_CREAT | SCE_O_WRONLY | SCE_O_TRUNC, 0777);
+-		if (f >= 0) {
+-			size_t sz;
+-			void *buf = serialize_shader(NULL, &sz, s, save_bindings);
+-			sceIoWrite(f, buf, sz);
+-			sceIoClose(f);
+-			vgl_free(buf);
+-		}
+-	}
++        size_t sz;
++        void *buf = serialize_shader(NULL, &sz, s, save_bindings);
++        if (buf) {
++            SceUID f = sceIoOpen(cache_fname, SCE_O_CREAT | SCE_O_WRONLY | SCE_O_TRUNC, 0777);
++            if (f >= 0) {
++                sceIoWrite(f, buf, sz);
++                sceIoClose(f);
++            }
++            vgl_free(buf);
++        }
++    }
+@@ -1041,0 +1056,23 @@
++static GLboolean vbo_attributes_are_packed(program *p, const SceGxmVertexStream *streams) {
++    uint32_t target = cur_vao->vertex_attrib_vbo[p->attr_map[0]];
++    for (uint32_t i = 0; i < p->attr_num; ++i) {
++        uint8_t attr = p->attr_map[i];
++        if (!(cur_vao->vertex_attrib_state & (1u << attr))) continue;
++        uint32_t offset = cur_vao->vertex_attrib_offsets[attr];
++        if (cur_vao->vertex_attrib_vbo[attr] != target ||
++            !vgl_vbo_attribute_is_packed(offset,streams[0].stride,streams[i].stride)) {
++            static unsigned samples;
++            if (samples < 8) {
++                vbo *buffer = (vbo *)cur_vao->vertex_attrib_vbo[attr];
++                vgl_log("VBO layout unpacked: program=%u frame=%u attr=%u offset32=0x%x offset16=0x%x stride=%u/%u buffer=%p data=%p size=%d.\n",
++                        cur_program,vgl_framecount,attr,offset,offset & UINT16_MAX,
++                        streams[0].stride,streams[i].stride,buffer,
++                        buffer ? buffer->ptr : NULL,buffer ? buffer->size : 0);
++                ++samples;
++            }
++            return GL_FALSE;
++        }
++    }
++    return GL_TRUE;
++}
++
+@@ -1044,0 +1082 @@
++    uint64_t work_started = vgl_work_tick();
+@@ -1175,4 +1213,2 @@
+-		else if (is_packed &&
+-				!(cur_vao->vertex_attrib_offsets[p->attr_map[0]] + streams[0].stride > cur_vao->vertex_attrib_offsets[p->attr_map[1]] &&
+-				  cur_vao->vertex_attrib_offsets[p->attr_map[1]] > cur_vao->vertex_attrib_offsets[p->attr_map[0]]))
+-			is_packed = GL_FALSE;
++		else if (is_packed)
++            is_packed = vbo_attributes_are_packed(p,streams);
+@@ -1258,0 +1295,2 @@
++    vgl_work_elapsed(&vgl_work.setup_us, work_started);
++    if (vgl_work.active) vgl_work.setups++;
+@@ -1290,0 +1329 @@
++    uint64_t work_started = vgl_work_tick();
+@@ -1423,4 +1462,2 @@
+-		else if (is_packed &&
+-				!(cur_vao->vertex_attrib_offsets[p->attr_map[0]] + streams[0].stride > cur_vao->vertex_attrib_offsets[p->attr_map[1]] &&
+-				  cur_vao->vertex_attrib_offsets[p->attr_map[1]] > cur_vao->vertex_attrib_offsets[p->attr_map[0]]))
+-			is_packed = GL_FALSE;
++		else if (is_packed)
++            is_packed = vbo_attributes_are_packed(p,streams);
+@@ -1540,0 +1578,2 @@
++    vgl_work_elapsed(&vgl_work.setup_us, work_started);
++    if (vgl_work.active) vgl_work.setups++;
+@@ -1555,0 +1595 @@
++    *highest = UINT32_MAX;
+@@ -1580,5 +1620,3 @@
+-    uint32_t first = vgl_index_range(indices, count, wide, highest);
+-    if (!first) {
+-        indexed_range_skip(4);
+-    }
+-    if (*highest == UINT32_MAX) {
++    uint32_t maximum;
++    uint32_t first = vgl_index_range(indices, count, wide, &maximum);
++    if (maximum == UINT32_MAX) {
+@@ -1590 +1628 @@
+-        if (stride && (*highest + 1u) >
++        if (stride && (maximum + 1u) >
+@@ -1594,0 +1633 @@
++    *highest = maximum;
+@@ -1613,0 +1653 @@
++    uint64_t work_started = vgl_work_tick();
+@@ -1729 +1768,0 @@
+-					break;
+@@ -1733 +1771,0 @@
+-					break;
+@@ -1741,0 +1780 @@
++				if (cur_vao->vertex_attrib_state & (1u << attr_idx))
+@@ -1750,0 +1790,2 @@
++        if (is_packed && target_vbo)
++            is_packed = vbo_attributes_are_packed(p,streams);
+@@ -1922,0 +1964,2 @@
++    vgl_work_elapsed(&vgl_work.setup_us, work_started);
++    if (vgl_work.active) vgl_work.setups++;
+@@ -2620,0 +2664,4 @@
++#ifdef HAVE_SHADER_CACHE
++    uint64_t link_started = vgl_work_tick();
++    uint64_t cache_us = 0, translate_us = 0, compile_save_us = 0;
++#endif
+@@ -2647,0 +2695 @@
++        uint64_t cache_started = vgl_work_tick();
+@@ -2651,0 +2700 @@
++        vgl_work_elapsed(&cache_us, cache_started);
+@@ -2655 +2704,7 @@
+-				glsl_translator_set_process(p->vshader, p->fshader);
++	#ifdef HAVE_SHADER_CACHE
++                uint64_t translate_started = vgl_work_tick();
++#endif
++			glsl_translator_set_process(p->vshader, p->fshader);
++#ifdef HAVE_SHADER_CACHE
++                vgl_work_elapsed(&translate_us, translate_started);
++#endif
+@@ -2660,0 +2716,3 @@
++#ifdef HAVE_SHADER_CACHE
++                uint64_t compile_started = vgl_work_tick();
++#endif
+@@ -2661,0 +2720,3 @@
++#ifdef HAVE_SHADER_CACHE
++                vgl_work_elapsed(&compile_save_us, compile_started);
++#endif
+@@ -2666,0 +2728,3 @@
++#ifdef HAVE_SHADER_CACHE
++                uint64_t compile_started = vgl_work_tick();
++#endif
+@@ -2667,0 +2732,3 @@
++#ifdef HAVE_SHADER_CACHE
++                vgl_work_elapsed(&compile_save_us, compile_started);
++#endif
+@@ -2914,0 +2982,20 @@
++#ifdef HAVE_SHADER_CACHE
++    if (vgl_work.active) {
++    uint64_t elapsed = sceKernelGetSystemTimeWide() - link_started;
++    shader_link_work.links++;
++    if (vgl_work.active) vgl_work.links++;
++    shader_link_work.total_us += elapsed;
++    shader_link_work.cache_us += cache_us;
++    shader_link_work.translate_us += translate_us;
++    shader_link_work.compile_save_us += compile_save_us;
++    if (elapsed > shader_link_work.max_us) shader_link_work.max_us = elapsed;
++    if (shader_link_work.links <= 8 || !(shader_link_work.links % 32))
++        vgl_log("Shader link work: links=%u total_us=%llu cache_us=%llu translate_us=%llu compile_save_us=%llu max_us=%llu prepared=%u disk=%u misses=%u.\n",
++            shader_link_work.links, (unsigned long long)shader_link_work.total_us,
++            (unsigned long long)shader_link_work.cache_us,
++            (unsigned long long)shader_link_work.translate_us,
++            (unsigned long long)shader_link_work.compile_save_us,
++            (unsigned long long)shader_link_work.max_us,
++            shader_link_work.prepared_hits, shader_link_work.disk_hits, shader_link_work.misses);
++    }
++#endif
+--- a/source/draw.c
++++ b/source/draw.c
+@@ -285 +285 @@
+-		is_draw_legal = _glDrawElements_CustomShadersIMPL(src, count, first_idx ? highest - first_idx + 1u : 0, 0, type != GL_UNSIGNED_INT ? SCE_GXM_INDEX_SOURCE_INDEX_16BIT : SCE_GXM_INDEX_SOURCE_INDEX_32BIT, first_idx);
++		is_draw_legal = _glDrawElements_CustomShadersIMPL(src, count, highest != UINT32_MAX ? highest - first_idx + 1u : 0, 0, type != GL_UNSIGNED_INT ? SCE_GXM_INDEX_SOURCE_INDEX_16BIT : SCE_GXM_INDEX_SOURCE_INDEX_32BIT, first_idx);
+--- a/source/gxm.c
++++ b/source/gxm.c
+@@ -578,0 +579,25 @@
++vgl_frame_work vgl_work = {.active = GL_TRUE};
++void vgl_work_report(void) {
++    static uint64_t started;
++    static uint32_t first_frame, windows;
++    if (!vgl_work.active) return;
++    uint64_t now = sceKernelGetSystemTimeWide();
++    if (started && vgl_framecount - first_frame < 300) return;
++    if (started) {
++        vgl_log("Frame work: first=%u last=%u wall_us=%llu setup_calls=%u setup_us=%llu temp_bytes=%llu spill_calls=%u spill_bytes=%llu spill_us=%llu scenes=%u scene_us=%llu queue_us=%llu gc_us=%llu finish_calls=%u finish_us=%llu links=%u uploads=%u.\n",
++            first_frame, vgl_framecount, (unsigned long long)(now-started),
++            vgl_work.setups, (unsigned long long)vgl_work.setup_us,
++            (unsigned long long)vgl_work.temp_bytes, vgl_work.spills,
++            (unsigned long long)vgl_work.spill_bytes, (unsigned long long)vgl_work.spill_us,
++            vgl_work.scenes, (unsigned long long)vgl_work.scene_us,
++            (unsigned long long)vgl_work.queue_us, (unsigned long long)vgl_work.gc_us,
++            vgl_work.finishes, (unsigned long long)vgl_work.finish_us,
++            vgl_work.links, vgl_work.uploads);
++        windows++;
++    }
++    // Start after a completed swap; startup before the first frame is excluded.
++    vgl_work = (vgl_frame_work){.active = windows < 8};
++    started = now;
++    first_frame = vgl_framecount;
++}
++
+@@ -588,0 +614,2 @@
++        uint64_t work_started = vgl_work_tick();
++        if (vgl_work.active) vgl_work.scenes++;
+@@ -707,0 +735 @@
++        vgl_work_elapsed(&vgl_work.scene_us, work_started);
+@@ -949,0 +978 @@
++        uint64_t queue_started = vgl_work_tick();
+@@ -950,0 +980 @@
++        vgl_work_elapsed(&vgl_work.queue_us, queue_started);
+@@ -985,0 +1016 @@
++    uint64_t gc_started = vgl_work_tick();
+@@ -986,0 +1018 @@
++    vgl_work_elapsed(&vgl_work.gc_us, gc_started);
+@@ -988,0 +1021 @@
++    vgl_work_report();
+@@ -996,0 +1030,2 @@
++    uint64_t finish_started = vgl_work_tick();
++    if (vgl_work.active) vgl_work.finishes++;
+@@ -997,0 +1033 @@
++    vgl_work_elapsed(&vgl_work.finish_us, finish_started);
+--- a/source/vgl.c
++++ b/source/vgl.c
+@@ -120,0 +121 @@
++    if (vgl_work.active) vgl_work.temp_bytes += size;
+@@ -142,0 +144,2 @@
++        uint64_t spill_started = vgl_work_tick();
++        if (vgl_work.active) { vgl_work.spills++; vgl_work.spill_bytes += size; }
+@@ -143,0 +147 @@
++        vgl_work_elapsed(&vgl_work.spill_us, spill_started);

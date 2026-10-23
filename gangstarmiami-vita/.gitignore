@@ -1,0 +1,20 @@
+build/
+build-*/
+*.vpk
+*.velf
+*.self
+*.so
+*.apk
+*.obb
+*.log
+runtime_logs/
+staging/
+.vita-dev.env
+/debug/
+
+# local test data: savegames pulled off the console
+repro-save/
+
+.DS_Store
+.agents/scratch/
+__pycache__/
